@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}报告 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">归纳结果</p><h1>报告</h1></div><form method="post" action="/reports/generate"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" name="use_demo_provider" value="true">生成演示报告</button></form></div>
+<section class="card">
+  {% if reports %}<div class="list">{% for report in reports %}<a class="list-item" href="/reports/{{ report.id }}"><div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span></div><span class="muted">{{ report.created_at }}</span></a>{% endfor %}</div>
+  {% else %}<p class="empty">暂无报告。</p>{% endif %}
+</section>
+{% endblock %}

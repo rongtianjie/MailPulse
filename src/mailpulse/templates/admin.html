@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}管理控制台 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">系统管理</p><h1>管理控制台</h1></div></div>
+<section class="grid-2">
+  <div class="card"><h2>用户</h2><div class="list">{% for item in users %}<div class="list-item"><span>{{ item.display_name }}<small>{{ item.email }}</small></span><span class="tag">{{ item.role }}</span></div>{% endfor %}</div></div>
+  <div class="card"><h2>最近任务</h2>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span>{{ job.stage }}<small>{{ job.run_key }}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</div>
+</section>
+<div class="notice">管理员默认只查看账号、任务和运行元数据，不显示普通用户邮件正文。</div>
+{% endblock %}

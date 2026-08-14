@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}邮箱设置 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">配置</p><h1>邮箱连接</h1></div></div>
+<section class="card narrow">
+  <p class="muted">V1 使用 IMAP 只读同步 INBOX。密码会加密保存，不会显示在页面或日志中。</p>
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  {% if saved %}<div class="alert success">配置已保存。</div>{% endif %}
+  <form method="post" action="/settings" class="form-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>邮箱地址<input type="email" name="email_address" value="{{ mailbox.email_address if mailbox else '' }}" required></label>
+    <label>IMAP 主机<input name="imap_host" value="{{ mailbox.imap_host if mailbox else '' }}" required></label>
+    <label>IMAP 端口<input type="number" name="imap_port" value="{{ mailbox.imap_port if mailbox else 993 }}" required></label>
+    <label>登录用户名<input name="username" value="{{ mailbox.username if mailbox else '' }}" required></label>
+    <label>邮箱密码<input type="password" name="password" {% if not mailbox %}required{% endif %} placeholder="{{ '留空表示不修改' if mailbox else '' }}"></label>
+    <label>SMTP 主机<input name="smtp_host" value="{{ mailbox.smtp_host if mailbox else '' }}"></label>
+    <label>SMTP 端口<input type="number" name="smtp_port" value="{{ mailbox.smtp_port if mailbox else 465 }}"></label>
+    <div class="form-actions"><button class="primary" type="submit">保存配置</button></div>
+  </form>
+</section>
+{% endblock %}

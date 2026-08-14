@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ report.title }} - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start }} 至 {{ report.period_end }}</p></div><span class="tag {{ report.status }}">{{ report.status }}</span></div>
+<section class="card report-card">
+  <pre class="report-content">{{ report.rendered_markdown }}</pre>
+</section>
+<section class="card"><h2>模型处理记录</h2><pre class="small-code">{{ report.model_trace }}</pre></section>
+{% endblock %}

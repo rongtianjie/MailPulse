@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}邮件 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">本地邮件索引</p><h1>邮件</h1></div></div>
+<section class="card">
+  <form method="get" action="/messages" class="search-bar"><input name="q" value="{{ query }}" placeholder="搜索主题、发件人或正文"><button class="secondary" type="submit">搜索</button></form>
+  {% if messages %}<div class="list">{% for message in messages %}<div class="message-item"><div><strong>{{ message.subject or '(无主题)' }}</strong><p class="muted">{{ message.sender }} · {{ message.received_at }}</p></div><span class="tag">{{ '已处理' if message.local_processed else '未处理' }}</span></div>{% endfor %}</div>
+  {% else %}<p class="empty">没有匹配邮件。</p>{% endif %}
+</section>
+{% endblock %}

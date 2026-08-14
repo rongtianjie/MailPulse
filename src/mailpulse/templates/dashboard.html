@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}概览 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">工作台</p><h1>你好，{{ user.display_name }}</h1></div></div>
+<section class="stats-grid">
+  <div class="stat-card"><span>已同步邮件</span><strong>{{ message_count }}</strong></div>
+  <div class="stat-card"><span>最近报告</span><strong>{{ reports|length }}</strong></div>
+  <div class="stat-card"><span>邮箱状态</span><strong>{{ '已配置' if mailbox else '待配置' }}</strong></div>
+</section>
+<section class="grid-2">
+  <div class="card">
+    <h2>快速开始</h2>
+    <ol class="steps">
+      <li class="{{ 'done' if mailbox else '' }}">配置邮箱连接</li>
+      <li>运行同步任务</li>
+      <li>选择规则并生成报告</li>
+    </ol>
+    <div class="actions">
+      <a class="button" href="/settings">邮箱设置</a>
+      <form method="post" action="/demo/seed"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">载入演示数据</button></form>
+    </div>
+  </div>
+  <div class="card">
+    <h2>报告生成</h2>
+    <p class="muted">当前可使用演示 Provider 验证完整流程；配置本地 MLX API 后可切换到真实模型。</p>
+    <form method="post" action="/reports/generate" class="actions">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="primary" name="use_demo_provider" value="true" type="submit">生成演示报告</button>
+      <button class="secondary" name="use_demo_provider" value="false" type="submit">使用已配置模型</button>
+    </form>
+  </div>
+</section>
+<section class="card">
+  <div class="section-heading"><h2>最近报告</h2><a href="/reports">查看全部</a></div>
+  {% if reports %}
+  <div class="list">{% for report in reports %}<a class="list-item" href="/reports/{{ report.id }}"><span>{{ report.title }}</span><span class="muted">{{ report.created_at }}</span></a>{% endfor %}</div>
+  {% else %}<p class="empty">还没有报告。可以先载入演示数据。</p>{% endif %}
+</section>
+{% endblock %}

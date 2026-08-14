@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}登录 - MailPulse{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <h1>登录 MailPulse</h1>
+  <p class="muted">公司内网邮件归纳整理工具</p>
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>账号<input type="email" name="email" required autocomplete="username"></label>
+    <label>密码<input type="password" name="password" required autocomplete="current-password"></label>
+    <button class="primary" type="submit">登录</button>
+  </form>
+</section>
+{% endblock %}

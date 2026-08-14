@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+import base64
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+class ActionItem(BaseModel):
+    action: str
+    owner: str | None = None
+    due_at: str | None = None
+    source_refs: list[str] = Field(default_factory=list)
+    verified: bool = False
+
+
+class SourceReference(BaseModel):
+    message_id: int
+    attachment_id: int | None = None
+    page_number: int | None = None
+    image_index: int | None = None
+    quote: str | None = None
+
+
+class StructuredSummary(BaseModel):
+    category: str = "其他"
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    summary: str = ""
+    action_items: list[ActionItem] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+    source_refs: list[SourceReference] = Field(default_factory=list)
+    attachment_status: list[str] = Field(default_factory=list)
+
+
+class VisualEvidence(BaseModel):
+    message_id: int
+    attachment_id: int
+    page_number: int | None = None
+    image_index: int | None = None
+    extracted_text: str = ""
+    tables: list[list[str]] = Field(default_factory=list)
+    detected_objects: list[str] = Field(default_factory=list)
+    key_fields: dict[str, str] = Field(default_factory=dict)
+    confidence_advisory: float | None = Field(default=None, ge=0, le=1)
+    evidence_status: Literal["verified", "uncertain", "failed"] = "verified"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class VisualEvidenceResponse(BaseModel):
+    evidence: list[VisualEvidence] = Field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ModelCapabilities:
+    text_input: bool = True
+    image_input: bool = False
+    structured_output: bool = False
+    strict_json_schema: bool = False
+
+
+@dataclass(slots=True)
+class ModelProfile:
+    name: str
+    base_url: str
+    api_key: str | None
+    model_name: str | None
+    capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
+
+
+@dataclass(slots=True)
+class TextPart:
+    text: str
+
+
+@dataclass(slots=True)
+class MarkdownPart:
+    text: str
+    source_name: str
+
+
+@dataclass(slots=True)
+class ImagePart:
+    path: Path
+    mime_type: str = "image/png"
+    source_name: str = ""
+
+
+@dataclass(slots=True)
+class EvidencePart:
+    evidence: list[VisualEvidence]
+
+
+ContentPart = TextPart | MarkdownPart | ImagePart | EvidencePart
+
+
+@dataclass(slots=True)
+class GenerationRequest:
+    role: str
+    content_parts: list[ContentPart]
+    response_schema: dict[str, Any] | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int = 1800
+    timeout: float = 90.0
+
+
+@dataclass(slots=True)
+class GenerationResult:
+    text: str
+    parsed_json: dict[str, Any] | None
+    model_name: str
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+def encode_image_part(part: ImagePart) -> str:
+    encoded = base64.b64encode(part.path.read_bytes()).decode("ascii")
+    return f"data:{part.mime_type};base64,{encoded}"
+
+
+def parse_json_text(text: str) -> dict[str, Any] | None:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+        cleaned = cleaned.rsplit("```", 1)[0].strip()
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError:
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return value if isinstance(value, dict) else None
