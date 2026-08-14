@@ -110,6 +110,7 @@ var/
 *.key
 *.p12
 *.pfx
+.DS_Store
 
 # Local model and generated attachment artifacts
 artifacts/

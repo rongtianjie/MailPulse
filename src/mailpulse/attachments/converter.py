@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from mimetypes import guess_type
 from pathlib import Path
 
 from markitdown import MarkItDown
@@ -32,10 +33,18 @@ class MarkItDownAttachmentConverter:
     def convert(self, session: Session, attachment: Attachment) -> ConvertedAttachment:
         warnings: list[str] = []
         if not attachment.storage_path:
+            status = attachment.conversion_status
+            if status in {"too_large", "too_many", "storage_limit"}:
+                warning = (attachment.conversion_warnings or ["附件未进入转换流程"])[0]
+                return self._finish(session, attachment, status, warning)
             return self._finish(session, attachment, "failed", "附件本地内容不存在")
         source = Path(attachment.storage_path)
         if not source.is_file():
             return self._finish(session, attachment, "failed", "附件文件不存在")
+        try:
+            source.resolve().relative_to(self.settings.attachments_dir.resolve())
+        except ValueError:
+            return self._finish(session, attachment, "failed", "附件路径不在受控存储目录")
         if source.stat().st_size > self.settings.max_attachment_bytes:
             return self._finish(session, attachment, "too_large", "附件超过单文件大小限制")
 
@@ -84,15 +93,33 @@ class MarkItDownAttachmentConverter:
     ) -> list[dict[str, str | int]]:
         assets: list[dict[str, str | int]] = []
         if mime_type.startswith("image/"):
-            assets.append({"path": str(source), "mime_type": mime_type, "image_index": 0})
+            if source.stat().st_size <= self.settings.max_image_bytes:
+                assets.append({"path": str(source), "mime_type": mime_type, "image_index": 0})
+            else:
+                warnings.append("图片资源超过单图片大小限制")
         for index, reference in enumerate(re.findall(r"!\[[^\]]*\]\(([^)]+)\)", markdown)):
+            if len(assets) >= self.settings.max_image_assets_per_attachment:
+                warnings.append("图片资源数量超过附件限制")
+                break
             candidate = Path(reference)
             if not candidate.is_absolute():
                 candidate = source.parent / candidate
-            if candidate.is_file():
+            try:
+                candidate = candidate.resolve()
+                candidate.relative_to(source.parent.resolve())
+            except ValueError:
+                warnings.append(f"Markdown 图片资源超出附件目录: {reference}")
+                continue
+            if candidate.is_file() and candidate.stat().st_size <= self.settings.max_image_bytes:
                 assets.append(
-                    {"path": str(candidate), "mime_type": "image/*", "image_index": index}
+                    {
+                        "path": str(candidate),
+                        "mime_type": guess_type(candidate.name)[0] or "image/*",
+                        "image_index": index,
+                    }
                 )
+            elif candidate.is_file():
+                warnings.append(f"Markdown 图片资源超过大小限制: {reference}")
             else:
                 warnings.append(f"Markdown 图片资源不存在: {reference}")
         return assets

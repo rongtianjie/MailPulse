@@ -2,19 +2,22 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .ai.demo_provider import DemoProvider
 from .ai.orchestrator import AIOrchestrator, ModelRouter
+from .ai.profile_service import AIProfileService
 from .ai.providers import OpenAICompatibleProvider
 from .ai.types import ModelCapabilities, ModelProfile
 from .attachments.converter import MarkItDownAttachmentConverter
 from .config import Settings, get_settings
 from .mail.types import RawMessage
-from .models import Attachment, CanonicalMessage, Mailbox, Report, User
+from .models import Attachment, AuditLog, CanonicalMessage, Mailbox, Report, RuleSet, User
 from .reports import render_summary_markdown
+from .rules import RuleService
 
 
 class ReportService:
@@ -22,20 +25,59 @@ class ReportService:
         self.session = session
         self.settings = settings or get_settings()
 
-    def generate_for_user(self, user: User, use_demo_provider: bool = False) -> Report:
-        messages = list(
+    def generate_for_user(
+        self,
+        user: User,
+        use_demo_provider: bool = False,
+        rule_set_id: int | None = None,
+        mailbox_id: int | None = None,
+        period_start: datetime | None = None,
+        period_end: datetime | None = None,
+        schedule_id: int | None = None,
+        run_key: str | None = None,
+    ) -> Report:
+        period_end = period_end or datetime.now(UTC)
+        if run_key is not None:
+            existing = self.session.scalar(
+                select(Report).where(Report.run_key == run_key, Report.user_id == user.id)
+            )
+            if existing is not None:
+                return existing
+        query = select(CanonicalMessage).where(CanonicalMessage.owner_user_id == user.id)
+        if period_start is not None:
+            query = query.where(
+                CanonicalMessage.received_at >= period_start,
+                CanonicalMessage.received_at <= period_end,
+            )
+        all_messages = list(
             self.session.scalars(
-                select(CanonicalMessage)
-                .where(CanonicalMessage.owner_user_id == user.id)
-                .order_by(CanonicalMessage.received_at.desc())
-                .limit(100)
+                query.order_by(CanonicalMessage.received_at.desc()).limit(
+                    self.settings.max_messages_per_report
+                )
             )
         )
+        rule_set = None
+        if rule_set_id is not None:
+            rule_set = self.session.scalar(
+                select(RuleSet).where(RuleSet.id == rule_set_id, RuleSet.user_id == user.id)
+            )
+            if rule_set is None:
+                raise ValueError("指定的规则集不存在或不属于当前用户")
+        else:
+            rule_set = self.session.scalar(
+                select(RuleSet)
+                .where(RuleSet.user_id == user.id, RuleSet.is_enabled.is_(True))
+                .order_by(RuleSet.priority.asc())
+            )
+        messages = RuleService(self.session).filter_messages(all_messages, rule_set)
         if not messages:
-            raise ValueError("当前用户没有可归纳的邮件，请先同步邮箱或生成演示数据")
-        mailbox = self.session.scalar(select(Mailbox).where(Mailbox.user_id == user.id))
+            raise ValueError("当前时间范围内没有符合规则的邮件")
+        mailbox_query = select(Mailbox).where(Mailbox.user_id == user.id)
+        if mailbox_id is not None:
+            mailbox_query = mailbox_query.where(Mailbox.id == mailbox_id)
+        mailbox = self.session.scalar(mailbox_query)
         if mailbox is None:
-            raise ValueError("当前用户尚未配置邮箱")
+            raise ValueError("指定邮箱不存在或不属于当前用户")
 
         converted = []
         converter = MarkItDownAttachmentConverter(self.settings)
@@ -48,7 +90,7 @@ class ReportService:
 
         raw_messages = [
             RawMessage(
-                message_id=message.message_id,
+                message_id=str(message.id),
                 subject=message.subject,
                 sender=message.sender,
                 recipients=message.recipients,
@@ -59,17 +101,27 @@ class ReportService:
             )
             for message in messages
         ]
-        orchestrator = self._build_orchestrator(use_demo_provider)
+        orchestrator = self._build_orchestrator(user, mailbox.id, use_demo_provider)
         summary, trace = orchestrator.summarize(raw_messages, converted)
-        end = datetime.now(UTC)
+        end = period_end
         start = min(
             (message.received_at for message in messages if message.received_at),
-            default=end - timedelta(days=1),
+            default=period_start or end - timedelta(days=1),
         )
+        conversion_status = [
+            f"附件 {attachment_id}: {result.status}"
+            + (f"（{'；'.join(result.warnings)}）" if result.warnings else "")
+            for attachment_id, result in converted
+        ]
+        if conversion_status:
+            summary.attachment_status = list(
+                dict.fromkeys([*conversion_status, *summary.attachment_status])
+            )
         report = Report(
             user_id=user.id,
             mailbox_id=mailbox.id,
-            run_key=f"manual:{user.id}:{end.timestamp()}",
+            schedule_id=schedule_id,
+            run_key=run_key or f"manual:{user.id}:{uuid4().hex}",
             period_start=start,
             period_end=end,
             status="success",
@@ -80,14 +132,50 @@ class ReportService:
         )
         self.session.add(report)
         self.session.flush()
+        self.session.add(
+            AuditLog(
+                actor_user_id=user.id,
+                action="ai_generate",
+                target_type="report",
+                target_id=str(report.id),
+                metadata_json={
+                    "message_count": len(messages),
+                    "period_start": start.isoformat(),
+                    "period_end": end.isoformat(),
+                    "primary_model": trace.get("primary_model", "demo"),
+                    "vision_model": trace.get("vision_model"),
+                    "used_vision": trace.get("used_vision", False),
+                },
+            )
+        )
         return report
 
-    def _build_orchestrator(self, use_demo_provider: bool) -> AIOrchestrator:
-        if use_demo_provider or not self.settings.ai_base_url:
+    def _build_orchestrator(
+        self, user: User, mailbox_id: int, use_demo_provider: bool
+    ) -> AIOrchestrator:
+        if use_demo_provider:
             primary = DemoProvider()
             return AIOrchestrator(
-                ModelRouter(primary, primary_image_input=False), max_output_tokens=1800
+                ModelRouter(primary, primary_image_input=False),
+                max_output_tokens=1800,
+                max_input_chars=self.settings.ai_max_input_chars,
+                retries=self.settings.ai_max_retries,
             )
+        resolved = AIProfileService(self.session, self.settings).resolve_for(user.id, mailbox_id)
+        if resolved.primary:
+            return AIOrchestrator(
+                ModelRouter(
+                    resolved.primary,
+                    primary_image_input=resolved.primary_image_input,
+                    vision=resolved.vision,
+                ),
+                max_output_tokens=self.settings.ai_max_output_tokens,
+                timeout=self.settings.ai_timeout_seconds,
+                max_input_chars=self.settings.ai_max_input_chars,
+                retries=self.settings.ai_max_retries,
+            )
+        if not self.settings.ai_base_url:
+            raise RuntimeError("尚未配置 AI 主模型，请在管理控制台配置或设置 MAILPULSE_AI_BASE_URL")
 
         if not self.settings.external_ai_allowed and not _is_local_url(self.settings.ai_base_url):
             raise PermissionError("当前策略禁止向外部 AI 服务发送邮件内容")
@@ -126,6 +214,8 @@ class ReportService:
             ),
             max_output_tokens=self.settings.ai_max_output_tokens,
             timeout=self.settings.ai_timeout_seconds,
+            max_input_chars=self.settings.ai_max_input_chars,
+            retries=self.settings.ai_max_retries,
         )
 
 

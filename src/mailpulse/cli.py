@@ -75,7 +75,11 @@ def main() -> None:
             print(f"已生成报告: {report.id}")
             return
         if args.command == "worker":
-            raise SystemExit("worker 调度器尚未接入，请先使用 run-once 验证任务链路")
+            db.close()
+            from .worker import run_worker
+
+            run_worker(settings)
+            return
     finally:
         db.close()
     parser.print_help()

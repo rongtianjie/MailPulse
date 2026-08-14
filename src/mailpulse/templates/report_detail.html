@@ -5,5 +5,25 @@
 <section class="card report-card">
   <pre class="report-content">{{ report.rendered_markdown }}</pre>
 </section>
-<section class="card"><h2>模型处理记录</h2><pre class="small-code">{{ report.model_trace }}</pre></section>
+<section class="card">
+  <div class="section-heading"><h2>邮件投递</h2></div>
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  {% if request.query_params.get('delivery') == 'sent' %}<div class="alert success">报告已发送。</div>{% endif %}
+  <form method="post" action="/reports/{{ report.id }}/send" class="actions">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="inline-field">收件人<input type="email" name="recipient" value="{{ user.email }}" required></label>
+    <button class="primary" type="submit">通过 SMTP 发送</button>
+  </form>
+  {% if deliveries %}
+  <div class="list delivery-list">
+    {% for delivery in deliveries %}
+    <div class="list-item">
+      <span>{{ delivery.destination }}<small>尝试 {{ delivery.attempts }} 次 · {{ delivery.created_at }}</small></span>
+      <span class="actions"><span class="tag {{ delivery.status }}">{{ delivery.status }}</span>{% if delivery.status == 'failed' %}<form method="post" action="/deliveries/{{ delivery.id }}/retry"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">重试</button></form>{% endif %}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">尚未投递。</p>{% endif %}
+</section>
+<section class="card"><h2>模型处理记录</h2><pre class="small-code">{{ report.model_trace | tojson(indent=2) }}</pre></section>
 {% endblock %}

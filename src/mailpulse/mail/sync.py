@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
@@ -52,8 +52,14 @@ class MailSyncService:
             cursor = SyncCursor(mailbox.sync_uid_validity, mailbox.sync_last_uid)
         batch = connector.sync_messages(cursor)
         result = SyncResult(fetched=len(batch.messages), cursor=batch.cursor)
+        storage_state = {
+            "user": self._stored_bytes(mailbox.user_id),
+            "global": self._stored_bytes(),
+        }
         for uid, raw_message in batch.messages:
-            created = self._store_message(mailbox, uid, batch.cursor.uid_validity, raw_message)
+            created = self._store_message(
+                mailbox, uid, batch.cursor.uid_validity, raw_message, storage_state
+            )
             result.created += int(created)
             result.linked += int(not created)
             result.attachments += len(raw_message.attachments)
@@ -66,7 +72,12 @@ class MailSyncService:
         return result
 
     def _store_message(
-        self, mailbox: Mailbox, uid: int, uid_validity: str, raw: RawMessage
+        self,
+        mailbox: Mailbox,
+        uid: int,
+        uid_validity: str,
+        raw: RawMessage,
+        storage_state: dict[str, int],
     ) -> bool:
         normalized_id = normalize_message_id(raw.message_id)
         content_hash = message_content_hash(raw)
@@ -121,37 +132,91 @@ class MailSyncService:
         )
         self.session.add(occurrence)
         if is_new:
-            self._store_attachments(canonical, raw)
+            self._store_attachments(canonical, raw, storage_state)
         return is_new
 
-    def _store_attachments(self, canonical: CanonicalMessage, raw: RawMessage) -> None:
-        for item in raw.attachments:
+    def _store_attachments(
+        self,
+        canonical: CanonicalMessage,
+        raw: RawMessage,
+        storage_state: dict[str, int],
+    ) -> None:
+        for index, item in enumerate(raw.attachments):
             digest = hashlib.sha256(item.payload).hexdigest()
-            if len(item.payload) > self.settings.max_attachment_bytes:
+            size_bytes = len(item.payload)
+            if index >= self.settings.max_attachments_per_message:
                 self.session.add(
                     Attachment(
                         message_id=canonical.id,
                         filename=item.filename,
                         mime_type=item.mime_type,
-                        size_bytes=len(item.payload),
+                        size_bytes=size_bytes,
+                        content_hash=digest,
+                        conversion_status="too_many",
+                        conversion_warnings=["邮件附件数量超过限制"],
+                    )
+                )
+                continue
+            if size_bytes > self.settings.max_attachment_bytes:
+                self.session.add(
+                    Attachment(
+                        message_id=canonical.id,
+                        filename=item.filename,
+                        mime_type=item.mime_type,
+                        size_bytes=size_bytes,
                         content_hash=digest,
                         conversion_status="too_large",
                         conversion_warnings=["附件超过单文件大小限制"],
                     )
                 )
                 continue
-            relative = Path(str(canonical.owner_user_id)) / digest[:2] / f"{digest}-{item.filename}"
+            if (
+                storage_state["user"] + size_bytes > self.settings.max_user_storage_bytes
+                or storage_state["global"] + size_bytes > self.settings.max_global_storage_bytes
+            ):
+                self.session.add(
+                    Attachment(
+                        message_id=canonical.id,
+                        filename=item.filename,
+                        mime_type=item.mime_type,
+                        size_bytes=size_bytes,
+                        content_hash=digest,
+                        conversion_status="storage_limit",
+                        conversion_warnings=["附件存储空间达到用户或全局上限"],
+                    )
+                )
+                continue
+            safe_name = _safe_filename(item.filename)
+            relative = Path(str(canonical.owner_user_id)) / digest[:2] / f"{digest}-{safe_name}"
             target = self.settings.attachments_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(item.payload)
             self.session.add(
                 Attachment(
                     message_id=canonical.id,
-                    filename=item.filename,
+                    filename=safe_name,
                     mime_type=item.mime_type,
-                    size_bytes=len(item.payload),
+                    size_bytes=size_bytes,
                     content_hash=digest,
                     storage_path=str(target),
                     conversion_status="pending",
                 )
             )
+            storage_state["user"] += size_bytes
+            storage_state["global"] += size_bytes
+
+    def _stored_bytes(self, user_id: int | None = None) -> int:
+        statement = (
+            select(func.coalesce(func.sum(Attachment.size_bytes), 0))
+            .join(CanonicalMessage, CanonicalMessage.id == Attachment.message_id)
+            .where(Attachment.storage_path.is_not(None))
+        )
+        if user_id is not None:
+            statement = statement.where(CanonicalMessage.owner_user_id == user_id)
+        return int(self.session.scalar(statement) or 0)
+
+
+def _safe_filename(value: str) -> str:
+    name = Path(value.replace("\\", "/")).name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return (name or "attachment.bin")[:180]

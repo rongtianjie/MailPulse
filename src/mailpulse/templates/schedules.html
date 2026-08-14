@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}定时任务 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">自动化</p><h1>定时任务</h1><p class="muted">按 IANA 时区定期同步邮箱、筛选邮件并生成报告。</p></div></div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<section class="grid-2">
+  <div class="card">
+    <h2>新增任务</h2>
+    {% if mailboxes %}
+    <form method="post" action="/schedules" class="form-grid">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>任务名称<input name="name" value="每日邮件报告" required></label>
+      <label>邮箱<select name="mailbox_id" required>{% for mailbox in mailboxes %}<option value="{{ mailbox.id }}">{{ mailbox.name }}（{{ mailbox.email_address }}）</option>{% endfor %}</select></label>
+      <label>规则集<select name="rule_set_id"><option value="">全部邮件</option>{% for rule in rule_sets %}<option value="{{ rule.id }}">{{ rule.name }}</option>{% endfor %}</select></label>
+      <label>任务类型<select name="schedule_type"><option value="daily">每日</option><option value="weekly">每周</option><option value="custom">自定义 cron</option></select></label>
+      <label>执行时间<input type="time" name="scheduled_time" value="09:00"></label>
+      <label>每周范围<select name="weekdays"><option value="mon-fri">周一至周五</option><option value="mon-sun">每天</option><option value="sat,sun">周末</option><option value="mon,wed,fri">周一、三、五</option></select></label>
+      <label>自定义 cron<input name="custom_cron" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
+      <label>时区<input name="timezone" value="Asia/Shanghai" required></label>
+      <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="24" required></label>
+      <label class="check"><input type="checkbox" name="is_enabled" checked> 创建后启用</label>
+      <div class="form-actions"><button class="primary" type="submit">保存任务</button></div>
+    </form>
+    {% else %}<p class="empty">请先在邮箱设置中配置邮箱。</p><a class="button" href="/settings">邮箱设置</a>{% endif %}
+  </div>
+  <div class="card">
+    <h2>配置说明</h2>
+    <ul class="muted compact-list">
+      <li>每日和每周模式适合初学者；需要复杂计划时使用五段 cron。</li>
+      <li>回看时间只决定首次运行或长时间未运行时的报告时间范围。</li>
+      <li>服务重启后的补跑使用上次成功时间到当前时间，并用唯一运行键避免重复报告。</li>
+      <li>邮箱默认以只读方式同步，任务不会修改服务器端已读、星标或文件夹状态。</li>
+    </ul>
+  </div>
+</section>
+<section class="card">
+  <div class="section-heading"><h2>已有任务</h2></div>
+  {% if schedules %}
+  <div class="list">
+    {% for schedule in schedules %}
+    <div class="list-item">
+      <span><strong>{{ schedule.name }}</strong><small>{{ schedule.cron_expression }} · {{ schedule.timezone }} · 回看 {{ schedule.lookback_hours }} 小时{% if schedule.last_run_at %} · 上次成功 {{ schedule.last_run_at }}{% endif %}</small></span>
+      <span class="actions"><span class="tag {{ 'success' if schedule.is_enabled else 'muted' }}">{{ '启用' if schedule.is_enabled else '停用' }}</span><form method="post" action="/schedules/{{ schedule.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if schedule.is_enabled else '启用' }}</button></form></span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">暂无定时任务。</p>{% endif %}
+</section>
+{% endblock %}

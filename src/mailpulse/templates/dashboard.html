@@ -2,6 +2,7 @@
 {% block title %}概览 - MailPulse{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">工作台</p><h1>你好，{{ user.display_name }}</h1></div></div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="stats-grid">
   <div class="stat-card"><span>已同步邮件</span><strong>{{ message_count }}</strong></div>
   <div class="stat-card"><span>最近报告</span><strong>{{ reports|length }}</strong></div>
@@ -17,6 +18,7 @@
     </ol>
     <div class="actions">
       <a class="button" href="/settings">邮箱设置</a>
+      {% if mailbox %}<form method="post" action="/sync"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">立即同步</button></form>{% endif %}
       <form method="post" action="/demo/seed"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">载入演示数据</button></form>
     </div>
   </div>

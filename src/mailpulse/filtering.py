@@ -43,6 +43,8 @@ class RuleEvaluator:
 
     def validate(self, node: Mapping[str, Any]) -> None:
         kind = node.get("kind")
+        if kind in {"match_all", "match_none"}:
+            return
         if kind == "group":
             operator = node.get("operator")
             if operator not in {"and", "or", "not"}:
@@ -74,6 +76,10 @@ class RuleEvaluator:
     def evaluate(self, node: Mapping[str, Any], message: Any) -> bool:
         self.validate(node)
         values = asdict(message) if is_dataclass(message) else message
+        if node["kind"] == "match_all":
+            return True
+        if node["kind"] == "match_none":
+            return False
         if node["kind"] == "group":
             children = node["children"]
             if node["operator"] == "and":
@@ -113,16 +119,20 @@ class RuleEvaluator:
             choices = {str(item).lower() for item in expected}
             return any(value in choices for value in actual_values)
         if operator in {"greater_than", "less_than"}:
-            try:
-                left = float(actual)
-                right = float(expected)
-            except (TypeError, ValueError) as exc:
-                if isinstance(actual, datetime) and isinstance(expected, str):
-                    left = actual.timestamp()
-                    right = datetime.fromisoformat(expected).timestamp()
-                else:
-                    raise RuleValidationError("比较操作的值必须可转换为数字或日期") from exc
-            return left > right if operator == "greater_than" else left < right
+            actual_items = actual if isinstance(actual, list) else [actual]
+            for item in actual_items:
+                try:
+                    left = float(item)
+                    right = float(expected)
+                except (TypeError, ValueError) as exc:
+                    if isinstance(item, datetime) and isinstance(expected, str):
+                        left = item.timestamp()
+                        right = datetime.fromisoformat(expected).timestamp()
+                    else:
+                        raise RuleValidationError("比较操作的值必须可转换为数字或日期") from exc
+                if left > right if operator == "greater_than" else left < right:
+                    return True
+            return False
         return False
 
     @staticmethod
@@ -134,5 +144,10 @@ class RuleEvaluator:
             if field == "attachment_type":
                 return [getattr(item, "mime_type", "") for item in attachments]
             if field == "attachment_size":
-                return [len(getattr(item, "payload", b"")) for item in attachments]
+                return [
+                    getattr(item, "size_bytes", None)
+                    if getattr(item, "size_bytes", None) is not None
+                    else len(getattr(item, "payload", b""))
+                    for item in attachments
+                ]
         return values.get(field)

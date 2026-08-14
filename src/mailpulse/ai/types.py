@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ActionItem(BaseModel):
@@ -15,6 +15,23 @@ class ActionItem(BaseModel):
     due_at: str | None = None
     source_refs: list[str] = Field(default_factory=list)
     verified: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_string_item(cls, value):
+        if isinstance(value, str):
+            return {"action": value}
+        return value
+
+    @field_validator("source_refs", mode="before")
+    @classmethod
+    def normalize_source_refs(cls, value):
+        if not isinstance(value, list):
+            return []
+        return [
+            item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+            for item in value
+        ]
 
 
 class SourceReference(BaseModel):
@@ -35,6 +52,17 @@ class StructuredSummary(BaseModel):
     questions: list[str] = Field(default_factory=list)
     source_refs: list[SourceReference] = Field(default_factory=list)
     attachment_status: list[str] = Field(default_factory=list)
+
+    @field_validator("priority", mode="before")
+    @classmethod
+    def normalize_priority(cls, value):
+        return {
+            "低": "low",
+            "普通": "normal",
+            "中": "normal",
+            "高": "high",
+            "紧急": "urgent",
+        }.get(value, value)
 
 
 class VisualEvidence(BaseModel):
@@ -64,12 +92,23 @@ class ModelCapabilities:
 
 
 @dataclass(slots=True)
+class ModelRuntimePolicy:
+    max_input_chars: int | None = None
+    max_output_tokens: int | None = None
+    timeout_seconds: float | None = None
+    max_retries: int | None = None
+    max_images: int | None = None
+    max_image_bytes: int | None = None
+
+
+@dataclass(slots=True)
 class ModelProfile:
     name: str
     base_url: str
     api_key: str | None
     model_name: str | None
     capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
+    policy: ModelRuntimePolicy = field(default_factory=ModelRuntimePolicy)
 
 
 @dataclass(slots=True)
@@ -106,6 +145,7 @@ class GenerationRequest:
     max_input_tokens: int | None = None
     max_output_tokens: int = 1800
     timeout: float = 90.0
+    retries: int = 0
 
 
 @dataclass(slots=True)
@@ -136,4 +176,7 @@ def parse_json_text(text: str) -> dict[str, Any] | None:
             value = json.loads(cleaned[start : end + 1])
         except json.JSONDecodeError:
             return None
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        # Some OpenAI-compatible local servers wrap a JSON object in a singleton array.
+        value = value[0]
     return value if isinstance(value, dict) else None

@@ -24,7 +24,8 @@ def render_summary_markdown(
             owner = f"（负责人：{item.owner}）" if item.owner else ""
             due = f"，截止：{item.due_at}" if item.due_at else ""
             verified = "已引用来源" if item.verified else "未验证"
-            lines.append(f"- [ ] {item.action}{owner}{due}（{verified}）")
+            refs = f"，来源：{'、'.join(item.source_refs)}" if item.source_refs else ""
+            lines.append(f"- [ ] {item.action}{owner}{due}（{verified}{refs}）")
     else:
         lines.append("- 无")
     for title, values in (
@@ -38,4 +39,17 @@ def render_summary_markdown(
         lines.extend(
             ["", "## 附件处理状态", *[f"- {value}" for value in summary.attachment_status]]
         )
+    if summary.source_refs:
+        lines.extend(["", "## 来源引用"])
+        for reference in summary.source_refs:
+            location = [f"邮件 {reference.message_id}"]
+            if reference.attachment_id is not None:
+                location.append(f"附件 {reference.attachment_id}")
+            if reference.page_number is not None:
+                location.append(f"第 {reference.page_number} 页")
+            if reference.image_index is not None:
+                location.append(f"图片 {reference.image_index}")
+            if reference.quote:
+                location.append(f"摘录：{reference.quote}")
+            lines.append("- " + "，".join(location))
     return "\n".join(lines)

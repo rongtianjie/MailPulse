@@ -72,20 +72,10 @@ class OpenAICompatibleProvider:
         }
         if request.response_schema and self.profile.capabilities.structured_output:
             payload["response_format"] = {"type": "json_object"}
-        response = httpx.post(
-            f"{self._base_url}/chat/completions",
-            headers=self._headers(),
-            json=payload,
-            timeout=request.timeout,
-        )
+        response = self._post_with_retries(payload, request)
         if response.status_code == 400 and "response_format" in payload:
             payload.pop("response_format")
-            response = httpx.post(
-                f"{self._base_url}/chat/completions",
-                headers=self._headers(),
-                json=payload,
-                timeout=request.timeout,
-            )
+            response = self._post_with_retries(payload, request)
         response.raise_for_status()
         data = response.json()
         text = data["choices"][0]["message"].get("content", "")
@@ -95,6 +85,30 @@ class OpenAICompatibleProvider:
             model_name=model_name,
             usage=data.get("usage", {}),
         )
+
+    def _post_with_retries(self, payload: dict[str, object], request: GenerationRequest):
+        retryable_statuses = {408, 425, 429}
+        last_error: Exception | None = None
+        for attempt in range(request.retries + 1):
+            try:
+                response = httpx.post(
+                    f"{self._base_url}/chat/completions",
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=request.timeout,
+                )
+            except httpx.RequestError as exc:
+                last_error = exc
+                if attempt >= request.retries:
+                    raise
+                continue
+            if response.status_code not in retryable_statuses and response.status_code < 500:
+                return response
+            if attempt >= request.retries:
+                return response
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("AI 请求未返回响应")
 
     @staticmethod
     def _content(parts: list[ContentPart]) -> list[dict[str, object]]:
