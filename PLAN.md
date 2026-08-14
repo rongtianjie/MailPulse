@@ -4,12 +4,16 @@
 
 当前项目目录为空，第一步建立项目规范和模块化 Python 单体应用。系统支持：
 
-- 多用户独立邮箱、权限隔离和本地账号登录。
-- IMAP 增量拉取、SMTP 报告发送。
-- 可视化规则 + 高级表达式。
+- 多用户独立邮箱、权限隔离和本地账号登录（V1：每用户单账号、仅 INBOX，接口预留扩展）。
+- IMAP 增量拉取（UIDVALIDITY 感知）、SMTP 报告发送（投递接口插件化）。
+- 可视化规则 + 高级表达式（自定义 DSL，AST 沙箱求值）。
 - 主模型与副模型角色化配置。
 - 管理员控制台和用户报告页面。
+- 邮件全文搜索（FTS5）、标签/星标/已处理标记。
+- 统计仪表盘、演示模式。
 - 默认只读邮箱、可追溯来源、失败可重试。
+
+> V1 范围决策：聚焦功能性。本期明确不做安全加固（提示注入防护、HTML 消毒、密钥轮换等）、IM 通知（企业微信/钉钉/飞书）与 AI 成本控制（摘要缓存、预算限流），详见下文「V1 范围决策」。
 
 ## AI 模型编排
 
@@ -109,7 +113,8 @@ VisualEvidence
 - FastAPI
 - Jinja2 + HTMX
 - SQLAlchemy + Alembic
-- SQLite 默认，保留 PostgreSQL 兼容能力
+- SQLite 默认（WAL 模式），保留 PostgreSQL 兼容能力
+- SQLite FTS5 提供邮件全文搜索（trigram tokenizer 支持中文子串匹配）
 - APScheduler 或等价轻量调度器
 - 支持 `web`、`worker`、`run-once` 运行模式
 - 支持 systemd，不依赖 Docker
@@ -117,14 +122,27 @@ VisualEvidence
 ### 主要模块
 
 - `auth`：本地账号、Session、密码哈希、权限。
-- `mail`：IMAP/SMTP、增量同步、线程归并、去重。
-- `filtering`：规则树、高级表达式、预览和回放。
+- `mail`：IMAP/SMTP、增量同步（UIDVALIDITY 感知）、线程归并、去重、标签/星标/已处理标记。
+- `filtering`：规则树、高级表达式（DSL + AST 沙箱求值）、预览和回放。
 - `attachments`：PDF、DOCX、XLSX、HTML、文本解析。
 - `ai`：模型目录、能力检测、路由、结构化输出。
 - `reports`：摘要模板、报告渲染、来源引用。
-- `delivery`：SMTP 发送、重试和发送状态。
+- `delivery`：SMTP 发送、重试和发送状态（接口插件化，预留 IM Webhook 等渠道）。
+- `search`：FTS5 全文索引与组合筛选查询。
+- `dashboard`：处理量、规则命中、待办等只读统计聚合。
+- `demo`：演示模式，内置 Fake Mail Provider 与示例数据。
 - `jobs`：调度、运行记录、锁和失败恢复。
 - `audit`：审计日志、敏感访问授权和操作追踪。
+
+### V1 范围决策
+
+- 邮箱：每用户单账号、仅同步 INBOX；`MailConnector` 接口预留多账号与多文件夹扩展。
+- 增量同步：跟踪 UIDVALIDITY，检测到变化时触发全量重同步；去重键为 `Message-ID + folder + UIDVALIDITY`。
+- 附件：同步时拉取元数据与正文，附件按需下载，设置大小上限与配额显示。
+- 高级表达式：自定义 DSL，编译为 AST 后沙箱求值，禁止 `eval` / 任意代码执行；表达式可引用邮件元数据（标签、已处理状态）；规则按优先级求值、支持短路。
+- 调度：报告任务按用户时区执行，支持每日 / 每周 / 自定义 cron，定义错过窗口的处理策略。
+- 投递：V1 实现 SMTP；`DeliveryProvider` 按插件设计，为 IM Webhook 等渠道预留。
+- 明确不做：安全加固（提示注入防护、HTML 消毒、密钥轮换等）、IM 通知、AI 成本控制（摘要缓存、预算限流）。
 
 ### 权限
 
@@ -169,6 +187,20 @@ ReportGenerator
 
 DeliveryProvider
   send(report, destination)
+
+SearchService
+  index_message(message)
+  search(query, filters)      # 全文 + 发件人/日期/标签/处理状态组合筛选
+
+MailStore
+  set_label(message_id, label)
+  set_processed(message_id, processed)
+
+DashboardStats
+  collect(scope)              # 处理量、规则命中、待办等聚合
+
+DemoSeeder
+  seed(user_id)               # 生成示例邮箱与规则数据
 ```
 
 核心类型：
@@ -179,6 +211,7 @@ DeliveryProvider
 - `RoutingDecision`
 - `VisualEvidence`
 - `StructuredSummary`
+- `SearchResult`
 - `JobRun`
 - `AuditLog`
 
@@ -195,6 +228,13 @@ DeliveryProvider
 - 用户无法访问其他用户的模型配置、邮件和报告。
 - 外部模型禁止策略确实阻止数据发送。
 - 重复执行不会重复同步、总结和发送。
+- UIDVALIDITY 变化时触发全量重同步，不丢邮件、不重复。
+- 表达式 DSL：非法表达式报错、沙箱禁止任意代码、规则优先级与短路求值正确。
+- 全文搜索：中文子串匹配、发件人/日期/标签/处理状态组合筛选。
+- 标签/星标/已处理标记的读写，以及规则引用处理状态。
+- 演示模式：Fake Provider 种子数据可完整走通 同步 → 总结 → 报告 流程。
+- 仪表盘统计与底层数据一致。
+- SMTP 投递插件化：替换为假投递渠道不影响上层流程。
 - 使用 Fake IMAP、Fake SMTP、Fake AI Provider 端到端测试。
 
 验收标准：
@@ -210,10 +250,13 @@ DeliveryProvider
 ## Assumptions and Defaults
 
 - 初期规模按 1–50 用户设计。
+- V1 每用户单账号、仅同步 INBOX，`MailConnector` 接口预留多账号与多文件夹扩展。
+- V1 聚焦功能性：不引入安全加固、IM 通知与 AI 成本控制；SMTP 投递接口插件化预留。
+- 高级表达式使用自定义 DSL + AST 沙箱求值，禁止 `eval`。
 - 第一版使用本地账号、IMAP/SMTP，不接入 SSO 或 OAuth2。
 - 外部 AI 默认关闭，必须经过策略授权。
 - 邮箱默认只读，不自动标记、移动或删除邮件。
 - 主模型和副模型都支持 OpenAI-compatible HTTP 与内部模型服务适配。
 - 图片 OCR 不是独立硬编码模块，而是视觉模型能力的一种实现。
 - 自动数据清理默认关闭，启用后必须支持预览、审计和可恢复处理。
-- 本轮只更新设计方案，尚未修改项目文件。
+- 设计方案已更新（V1 功能范围确定），尚未开始实现。
