@@ -43,7 +43,7 @@ uv run mailpulse seed-demo --user-email admin@example.com
 uv run mailpulse run-once --user-email admin@example.com --demo-ai
 ```
 
-网页首页也提供“载入演示数据”和“生成演示报告”按钮。演示流程覆盖 Fake IMAP → MarkItDown → 规则/报告 → 网页查看。
+演示命令仅用于开发和自动化验收，不会出现在正式网页用户界面中。演示流程覆盖 Fake IMAP → MarkItDown → 规则/报告 → 网页查看。
 
 ## 本地 MLX 配置
 

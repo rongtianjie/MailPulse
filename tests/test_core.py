@@ -812,6 +812,10 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     )
     assert response.status_code == 200
     assert "快速开始" in response.text
+    assert "载入演示数据" not in response.text
+    assert "生成演示报告" not in response.text
+    assert "当前可使用演示 Provider" not in response.text
+    assert "生成报告" in response.text
     assert client.post("/demo/seed", data={}).status_code == 403
     dashboard = client.get("/")
     token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
@@ -867,7 +871,8 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     settings_token = re.search(r'name="csrf_token" value="([^"]+)"', settings_page.text).group(1)
     tested_settings = client.post("/settings/test", data={"csrf_token": settings_token})
     assert tested_settings.status_code == 200
-    assert "IMAP 连接测试成功" in tested_settings.text
+    assert "IMAP 连接验证成功" in tested_settings.text
+    assert "测试 IMAP 连接" not in tested_settings.text
     messages_page = client.get("/messages")
     message_db = build_session_factory(settings)()
     message_id = message_db.query(CanonicalMessage).order_by(CanonicalMessage.id).first().id
@@ -892,7 +897,9 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         data={"use_demo_provider": "true", "csrf_token": token},
     )
     assert report_response.status_code == 200
-    assert "演示报告" in client.get("/reports").text
+    reports_page_text = client.get("/reports").text
+    assert "生成报告" in reports_page_text
+    assert "生成演示报告" not in reports_page_text
     report_detail_page = client.get("/reports/1")
     assert report_detail_page.status_code == 200
     assert '"used_vision": false' in report_detail_page.text
