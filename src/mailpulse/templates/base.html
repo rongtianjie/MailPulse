@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}MailPulse{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v=20260815-ui">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/">MailPulse</a>
     {% if user %}
-    <nav>
+    <nav class="main-nav">
       <a href="/">概览</a>
       <a href="/messages">邮件</a>
       <a href="/rules">筛选规则</a>
@@ -19,7 +19,7 @@
       <a href="/settings">邮箱设置</a>
       {% if user.role == 'admin' %}<a href="/admin">管理控制台</a>{% endif %}
     </nav>
-    <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">退出</button></form>
+    <form class="session-actions" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">退出</button></form>
     {% endif %}
   </header>
   <main class="container">
