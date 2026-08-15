@@ -9,6 +9,8 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>账号<input type="email" name="email" required autocomplete="username"></label>
     <label>密码<input type="password" name="password" required autocomplete="current-password"></label>
+    <label class="check"><input type="checkbox" name="remember_me" value="true"> <span>记住登录状态</span></label>
+    <p class="muted compact">仅延长登录会话，不保存密码。</p>
     <button class="primary" type="submit">登录</button>
   </form>
 </section>

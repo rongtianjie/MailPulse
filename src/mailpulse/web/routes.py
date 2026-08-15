@@ -112,6 +112,7 @@ def login(
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
+    remember_me: bool = Form(False),
     csrf_token: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -127,6 +128,7 @@ def login(
     limiter.clear(client_key)
     request.session.clear()
     request.session["user_id"] = user.id
+    request.session["remember_me"] = remember_me
     db.add(
         AuditLog(actor_user_id=user.id, action="login", target_type="user", target_id=str(user.id))
     )

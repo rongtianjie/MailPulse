@@ -12,6 +12,7 @@ from .config import get_settings
 from .db import bootstrap_database
 from .logging_config import configure_logging
 from .web.routes import router
+from .web.session import SessionCookiePolicyMiddleware
 
 
 def create_app() -> FastAPI:
@@ -29,8 +30,13 @@ def create_app() -> FastAPI:
         SessionMiddleware,
         secret_key=settings.secret_key,
         session_cookie=settings.session_cookie,
+        max_age=settings.remember_me_days * 24 * 60 * 60,
         https_only=settings.session_https_only,
         same_site="lax",
+    )
+    app.add_middleware(
+        SessionCookiePolicyMiddleware,
+        session_cookie=settings.session_cookie,
     )
 
     static_dir = Path(__file__).parent / "static"

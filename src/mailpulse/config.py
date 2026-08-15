@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "MailPulse"
+    # Environment label used for production secret validation; it does not switch services.
     environment: str = "development"
     host: str = "127.0.0.1"
     port: int = 8080
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     log_rotation: str = "00:00"
     log_retention: str = "30 days"
     session_cookie: str = "mailpulse_session"
+    remember_me_days: int = Field(default=30, ge=1, le=365)
     session_https_only: bool = False
     default_admin_email: str = "admin@mailpulse.local"
     default_admin_password: str = Field(default="admin123", min_length=8)

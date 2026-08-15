@@ -92,14 +92,17 @@ uv run mailpulse reset-db --confirm
 
 配置项位于 `.env`，模板见 `.env.example`。生产环境至少需要设置：
 
+- `MAILPULSE_ENVIRONMENT`：运行环境标识。`development` 为开发环境；`production` 或 `prod` 会启用生产密钥校验，但不会自动切换数据库、日志或其他服务实现。
 - `MAILPULSE_SECRET_KEY`：Session 加密密钥。
 - `MAILPULSE_CREDENTIAL_KEY`：邮箱和模型凭据加密密钥。
 - `MAILPULSE_DATA_DIR`：SQLite、附件、转换结果和日志的存储目录。
 - `MAILPULSE_LOG_LEVEL`：控制台和文件日志级别，默认 `INFO`。
 - `MAILPULSE_LOG_ROTATION` / `MAILPULSE_LOG_RETENTION`：日志轮转时间和保留时间，默认每天零点轮转。
+- `MAILPULSE_REMEMBER_ME_DAYS`：勾选记住登录状态时的会话有效期，默认 30 天。
 
 生产环境应使用独立的随机密钥，并确保运行目录仅对应用账号可读写。密钥、邮箱密码和 AI API Key 不得提交到版本库。
 日志默认输出到控制台并写入 `var/logs/mailpulse.log`，按配置自动轮转和清理。默认管理员密码仅输出到控制台，不写入日志文件。
+登录页面的“记住登录状态”只延长签名 Session Cookie 的有效期，不保存密码。
 
 ## AI 模型配置
 

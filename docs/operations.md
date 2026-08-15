@@ -23,6 +23,8 @@ uv sync
 cp .env.example .env
 ```
 
+`MAILPULSE_ENVIRONMENT` 用于标识运行环境。设置为 `development` 时使用开发环境规则；设置为 `production` 或 `prod` 时，应用会要求显式配置 `MAILPULSE_SECRET_KEY` 和 `MAILPULSE_CREDENTIAL_KEY`。该配置只影响环境标识和密钥校验，不会自动切换数据库、日志或其他服务实现。
+
 生产环境必须替换：
 
 - `MAILPULSE_SECRET_KEY`
@@ -31,6 +33,7 @@ cp .env.example .env
 两个密钥应使用不同的随机值。`.env` 不得提交到版本库。
 
 日志默认输出到控制台，并写入 `var/logs/mailpulse.log`，每天零点轮转。可通过 `MAILPULSE_LOG_LEVEL`、`MAILPULSE_LOG_ROTATION` 和 `MAILPULSE_LOG_RETENTION` 调整级别、轮转时间和保留策略。默认管理员密码仅输出到控制台，不写入日志文件。
+登录页面的“记住登录状态”只延长签名 Session Cookie 的有效期，默认保留 30 天，不保存密码。
 
 ## 3. 初始化与启动
 

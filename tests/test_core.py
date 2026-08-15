@@ -1268,3 +1268,67 @@ def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
     )
     assert new_password.status_code == 200
     assert new_password.url.path == "/admin"
+
+
+def test_unauthenticated_routes_redirect_to_login(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "redirect-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    try:
+        client = TestClient(create_app())
+        dashboard = client.get("/", follow_redirects=False)
+        admin = client.get("/admin", follow_redirects=False)
+    finally:
+        get_settings.cache_clear()
+
+    assert dashboard.status_code == 303
+    assert dashboard.headers["location"] == "/login"
+    assert admin.status_code == 303
+    assert admin.headers["location"] == "/login"
+
+
+def test_login_remember_me_controls_cookie_persistence(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "remember-me-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    try:
+        client = TestClient(create_app())
+        login_page = client.get("/login")
+        assert "记住登录状态" in login_page.text
+        login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+        normal = client.post(
+            "/login",
+            data={
+                "email": "admin@mailpulse.local",
+                "password": "admin123",
+                "csrf_token": login_token,
+            },
+            follow_redirects=False,
+        )
+        normal_cookie = normal.headers["set-cookie"]
+        assert "Max-Age=" not in normal_cookie
+        assert "admin123" not in normal_cookie
+
+        remembered_client = TestClient(create_app())
+        login_page = remembered_client.get("/login")
+        login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+        remembered = remembered_client.post(
+            "/login",
+            data={
+                "email": "admin@mailpulse.local",
+                "password": "admin123",
+                "remember_me": "true",
+                "csrf_token": login_token,
+            },
+            follow_redirects=False,
+        )
+        remembered_cookie = remembered.headers["set-cookie"]
+    finally:
+        get_settings.cache_clear()
+
+    assert "Max-Age=2592000" in remembered_cookie
+    assert "admin123" not in remembered_cookie
