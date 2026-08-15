@@ -1,8 +1,28 @@
 # MailPulse
 
-MailPulse 是一个面向公司内网的多用户邮件归纳整理工具：通过 IMAP 只读拉取邮件，使用规则筛选，再使用可配置的主模型和可选视觉副模型生成结构化报告，并通过网页和 SMTP 提供结果。
+MailPulse 是面向公司内网的多用户邮件归纳整理工具。系统通过 IMAP 只读同步邮件，使用确定性规则筛选内容，再调用可配置的 AI 模型生成结构化报告，并通过网页和 SMTP 提供结果。
 
-当前版本是可初期交付的 V1 垂直切片，适合在内网单机或单 worker 环境试运行。真实邮箱和 SMTP 仍需要在目标环境单独验收。
+## 功能概览
+
+- 多用户账号与角色权限管理。
+- IMAP 只读同步、邮件去重和本地全文搜索。
+- 可配置筛选规则、标签、星标和已处理状态。
+- 每日、每周和自定义 Cron 定时任务。
+- 支持多模态主模型，或文本主模型搭配视觉模型处理图片附件。
+- 附件通过内置 MarkItDown 转换为 Markdown 和图片资源后进入模型流程。
+- 报告网页查看、SMTP 投递、失败重试和运行记录。
+- 本地 SQLite 数据库、CSRF 防护、登录限流和凭据加密。
+
+## 功能界面
+
+系统根据账号角色提供对应的功能界面：
+
+| 角色 | 主要功能 |
+| --- | --- |
+| 管理员 | 用户管理、模型管理、任务监控和平台运行概览 |
+| 普通用户 | 邮箱设置、邮件搜索、筛选规则、定时任务和报告 |
+
+管理员登录后进入管理控制台，普通用户登录后进入邮件工作台。两类页面使用独立导航，并通过服务端权限校验控制访问范围。
 
 ## 快速开始
 
@@ -10,11 +30,11 @@ MailPulse 是一个面向公司内网的多用户邮件归纳整理工具：通�
 
 ```bash
 uv sync
-uv run mailpulse --help
+uv run python -m mailpulse --help
 uv run pytest
 ```
 
-复制配置模板并修改密钥（不要提交 `.env`）：
+复制配置模板并修改密钥：
 
 ```bash
 cp .env.example .env
@@ -23,75 +43,103 @@ cp .env.example .env
 初始化数据库和管理员账号：
 
 ```bash
-uv run mailpulse init --admin-email admin@example.com --admin-password 'change-this-password'
+uv run mailpulse init \
+  --admin-email admin@example.com \
+  --admin-password 'change-this-password'
 ```
 
-启动网页控制台：
+启动网页服务：
 
 ```bash
 uv run mailpulse serve --host 127.0.0.1 --port 8080
 ```
 
-打开 <http://127.0.0.1:8080> 登录。应用启动和 `init` 会自动执行 Alembic 迁移；也可以显式执行 `uv run alembic upgrade head`。
-
-## 演示模式
-
-不连接真实邮箱时，可以先创建演示数据：
+打开 <http://127.0.0.1:8080> 登录。应用启动和 `init` 命令会自动执行数据库迁移，也可以手动执行：
 
 ```bash
-uv run mailpulse seed-demo --user-email admin@example.com
-uv run mailpulse run-once --user-email admin@example.com --demo-ai
+uv run alembic upgrade head
 ```
 
-演示命令仅用于开发和自动化验收，不会出现在正式网页用户界面中。演示流程覆盖 Fake IMAP → MarkItDown → 规则/报告 → 网页查看。
+## 配置说明
 
-## 本地 MLX 配置
+配置项位于 `.env`，模板见 `.env.example`。生产环境至少需要设置：
 
-管理员登录“管理控制台”，新增一个 `Primary` 模型目录。例如本地 MLX OpenAI-compatible 服务：
+- `MAILPULSE_SECRET_KEY`：Session 加密密钥。
+- `MAILPULSE_CREDENTIAL_KEY`：邮箱和模型凭据加密密钥。
+- `MAILPULSE_DATA_DIR`：SQLite、附件、转换结果和日志的存储目录。
 
-- Base URL：`http://127.0.0.1:8000/v1`
-- API Key：按服务实际配置填写，不要写入版本库
-- Model：`Qwen3.8-27B-MLX-4bit`
-- 图片输入：只有确认该模型支持图片时才勾选
+生产环境应使用独立的随机密钥，并确保运行目录仅对应用账号可读写。密钥、邮箱密码和 AI API Key 不得提交到版本库。
 
-模型输入只包含邮件正文、MarkItDown 生成的 Markdown 和受限图片资源，不上传原生 PDF 或 Office 文件。若主模型只支持文本，可再新增一个 `Vision` profile；视觉模型先输出可校验的 `VisualEvidence`，主模型再生成最终报告。每个 profile 都可独立设置输入字符数、输出 token、超时、重试次数、图片数量和单图片大小。
+## AI 模型配置
 
-配置模型后，可在首页点击“使用已配置模型”，或执行：
+管理员在“模型管理”页面维护 OpenAI-compatible 模型服务。模型可按以下方式配置：
 
-```bash
-uv run mailpulse run-once --user-email admin@example.com
+1. 配置一个同时支持文本和图片输入的 Primary 模型。
+2. 配置一个仅支持文本的 Primary 模型，再配置一个支持图片输入的 Vision 模型。
+
+附件处理流程如下：
+
+```text
+原始附件 → MarkItDown → Markdown 和图片资源 → 模型编排 → 结构化报告
 ```
 
-## 定时任务与投递
+模型流程使用转换后的内容，不使用原生 PDF 或 Office 文件上传。每个模型配置均可独立设置输入长度、输出 token、超时、重试次数、图片数量和图片大小限制。
 
-网页“定时任务”页面支持每日、每周、自定义五段 cron、IANA 时区和回看时间。单 worker 运行：
+本地 MLX 等 OpenAI-compatible 服务示例：
+
+```text
+Base URL: http://127.0.0.1:8000/v1
+Model:    按服务实际提供的模型名称填写
+```
+
+## 定时任务与报告投递
+
+普通用户可以在“定时任务”页面配置同步、筛选和报告生成任务：
+
+- 每日、每周或五段 Cron 表达式。
+- IANA 时区。
+- 邮件回看时间。
+- 任务启用、停用和编辑。
+
+启动后台 worker：
 
 ```bash
 uv run mailpulse worker
 ```
 
-报告详情页可手动通过 SMTP 发送；worker 会复用同一投递记录，并保存失败状态和重试次数。当前没有真实 SMTP 验收时，不要把演示邮箱主机当作可用 SMTP 服务。
+报告详情页支持通过 SMTP 手动发送。定时任务也可以复用投递记录，并保存状态、尝试次数和错误信息。
 
-## 数据与安全边界
+## 数据与安全
 
-管理员登录后可在“管理控制台”创建普通用户，并在同一页面维护 OpenAI-compatible 主模型或视觉模型目录。
+- 邮箱使用 IMAP 只读模式，不修改服务器端已读、星标、文件夹或删除状态。
+- 本地标签、星标和已处理状态由 MailPulse 独立维护。
+- 用户查询均带账号范围，服务端不会仅依赖前端隐藏导航实现权限控制。
+- 邮件正文、HTML、附件和模型输出均按不可信输入处理。
+- 附件解析受文件类型、大小、数量、处理时间和资源数量限制。
+- 运行数据默认写入 `var/`，该目录属于缓存和输出，不纳入版本控制。
 
-- 运行数据默认写入 `var/`，包括 SQLite、附件、Markdown 转换结果、缓存和日志，不会提交到版本库。
-- 生产环境必须设置独立的 `MAILPULSE_SECRET_KEY` 和 `MAILPULSE_CREDENTIAL_KEY`；密码和邮箱/模型凭据不会以明文写入数据库。
-- 邮箱同步使用 IMAP 只读模式；标签、星标和已处理状态只存在于 MailPulse。
-- 所有用户查询带用户范围；管理员页面默认只显示账号、任务和运行元数据，不提供普通用户邮件正文浏览入口。
-- 邮件正文和附件属于不可信输入，不会触发系统工具调用。
+更详细的系统结构、运行方式和维护边界见：
 
-## 验证命令
+- [架构说明](docs/architecture.md)
+- [运行与维护](docs/operations.md)
+- [项目计划](PLAN.md)
 
-提交前建议执行：
+## 开发验证
+
+演示数据命令仅用于本地开发和自动化测试，不属于正式网页功能：
 
 ```bash
-uv sync
+uv run mailpulse seed-demo --user-email user@example.com
+uv run mailpulse run-once --user-email user@example.com --demo-ai
+```
+
+提交前执行：
+
+```bash
 uv run pytest
 uv run ruff check .
 uv run alembic check
 uv run python -m mailpulse --help
 ```
 
-当前已验证：Fake Provider 的同步、附件转换、规则、调度、投递、权限和网页流程，以及本地 MLX OpenAI-compatible 文本模型的真实报告生成。尚未替代目标环境验收的部分包括真实 IMAP 邮箱、真实 SMTP 投递、多实例 worker 锁、用户停用/密码重置、报告模板编辑器和附件配额回收。
+测试使用 Fake IMAP、Fake SMTP 和 Fake AI Provider，不依赖真实公司邮箱或真实 AI 服务。真实 IMAP、SMTP、目标模型服务和生产部署仍需在目标环境单独验收。

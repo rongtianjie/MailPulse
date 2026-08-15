@@ -1,7 +1,7 @@
 {% extends "admin_base.html" %}
 {% block title %}系统概览 - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">平台管理</p><h1>系统概览</h1><p class="muted">管理员只负责平台配置和运行状态，不进入邮件业务工作台。</p></div></div>
+<div class="page-heading"><div><p class="eyebrow">平台管理</p><h1>系统概览</h1><p class="muted">集中查看账号、模型配置和任务运行状态。</p></div></div>
 <section class="stats-grid admin-stats">
   <div class="stat-card"><span>用户账号</span><strong>{{ users_count }}</strong><small>{{ active_users_count }} 个已启用</small></div>
   <div class="stat-card"><span>模型配置</span><strong>{{ profiles_count }}</strong><small>{{ enabled_profiles_count }} 个已启用</small></div>
@@ -10,8 +10,7 @@
 <section class="grid-2 admin-card-grid">
   <a class="card admin-link-card" href="/admin/users"><span class="admin-card-icon">U</span><div><h2>用户管理</h2><p class="muted">创建、停用和查看公司内网账号状态。</p><span class="button">进入用户管理</span></div></a>
   <a class="card admin-link-card" href="/admin/models"><span class="admin-card-icon">AI</span><div><h2>模型管理</h2><p class="muted">维护主模型、视觉副模型及其运行策略。</p><span class="button">进入模型管理</span></div></a>
-  <a class="card admin-link-card" href="/admin/jobs"><span class="admin-card-icon">J</span><div><h2>任务监控</h2><p class="muted">查看同步、归纳和投递任务的状态与错误元数据。</p><span class="button">进入任务监控</span></div></a>
-  <div class="card admin-note-card"><p class="eyebrow">权限边界</p><h2>管理员账号不拥有邮件业务数据</h2><p class="muted">管理员不能访问普通用户的邮箱、邮件正文、附件、筛选规则和报告内容。需要使用归纳功能时，请使用独立的普通用户账号。</p></div>
+  <a class="card admin-link-card" href="/admin/jobs"><span class="admin-card-icon">J</span><div><h2>任务监控</h2><p class="muted">查看同步、归纳和投递任务的状态与错误信息。</p><span class="button">进入任务监控</span></div></a>
 </section>
 <section class="card"><div class="section-heading"><h2>最近运行记录</h2><a class="link-button" href="/admin/jobs">查看全部</a></div>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span>{{ job.stage }}<small>{{ job.run_key }} · {{ job.started_at | fmt_time }}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</section>
 {% endblock %}

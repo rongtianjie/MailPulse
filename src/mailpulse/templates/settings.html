@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">配置</p><h1>邮箱连接</h1></div></div>
 <section class="card narrow">
-  <p class="muted">V1 使用 IMAP 只读同步 INBOX。密码会加密保存，不会显示在页面或日志中。</p>
+  <p class="muted">当前使用 IMAP 只读同步 INBOX。密码会加密保存，不会显示在页面或日志中。</p>
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
   {% if saved %}<div class="alert success">配置已保存。</div>{% endif %}
   {% if tested %}<div class="alert success">IMAP 连接验证成功。</div>{% endif %}

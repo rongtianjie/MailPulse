@@ -2,7 +2,7 @@
 {% block header %}
 <header class="topbar user-topbar">
   <a class="brand" href="/">MailPulse</a>
-  <nav class="main-nav user-nav" aria-label="用户工作台">
+  <nav class="main-nav user-nav" aria-label="邮件工作台">
     <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">概览</a>
     <a href="/messages" class="{{ 'active' if request.url.path.startswith('/messages') else '' }}">邮件</a>
     <a href="/rules" class="{{ 'active' if request.url.path.startswith('/rules') else '' }}">筛选规则</a>

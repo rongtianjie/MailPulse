@@ -140,6 +140,7 @@ nav a.active { color: var(--accent-dark); background: var(--accent-soft); font-w
   color: var(--muted);
   font-size: 12px;
 }
+.admin-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .admin-link-card {
   display: flex;
   align-items: flex-start;
@@ -169,7 +170,6 @@ nav a.active { color: var(--accent-dark); background: var(--accent-soft); font-w
   font-weight: 800;
   letter-spacing: .04em;
 }
-.admin-note-card { border-left: 3px solid var(--accent); }
 
 .container {
   width: min(1120px, 90vw);
