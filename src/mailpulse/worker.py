@@ -181,24 +181,8 @@ def _run_schedule(
         session.commit()
         if mailbox.smtp_host:
             stage = job.stage = "delivery"
-            delivery = session.scalar(
-                select(Delivery)
-                .where(Delivery.report_id == report.id)
-                .order_by(Delivery.created_at.desc())
-            )
             service = ReportDeliveryService(session, settings)
-            if delivery and delivery.status == "sent":
-                pass
-            elif delivery:
-                delivery = service.retry_delivery(delivery, report, mailbox)
-            else:
-                if not user.email:
-                    session.commit()
-                    raise RuntimeError("用户未配置邮箱，无法自动投递报告，请在报告页面手动发送")
-                delivery = service.send_report(report, mailbox, user.email)
-            if delivery.status != "sent":
-                session.commit()
-                raise RuntimeError("SMTP 投递失败")
+            _deliver_to_targets(session, service, report, schedule, mailbox)
         job = session.get(JobRun, job.id)
         schedule = session.get(Schedule, schedule.id)
         job.stage = "complete"
@@ -226,6 +210,34 @@ def _run_schedule(
         session.commit()
         logger.error("schedule {} failed at {}: {}", schedule.id, stage, type(exc).__name__)
         return False
+
+
+def _deliver_to_targets(session, service, report, schedule, mailbox) -> None:
+    """Deliver a report to every enabled target of the schedule.
+
+    Each target gets its own Delivery record (reused for retries); raises
+    RuntimeError when there is nothing to deliver or any target fails.
+    """
+    targets = [item for item in schedule.delivery_targets if item.is_enabled]
+    if not targets:
+        raise RuntimeError("任务未配置报告投递目标，请在任务设置中添加")
+    for target in targets:
+        delivery = session.scalar(
+            select(Delivery)
+            .where(
+                Delivery.report_id == report.id,
+                Delivery.destination == target.destination,
+            )
+            .order_by(Delivery.created_at.desc())
+        )
+        if delivery and delivery.status == "sent":
+            continue
+        if delivery:
+            delivery = service.retry_delivery(delivery, report, mailbox)
+        else:
+            delivery = service.send_report(report, mailbox, target.destination)
+        if delivery.status != "sent":
+            raise RuntimeError("SMTP 投递失败")
 
 
 def _as_aware(value: datetime) -> datetime:

@@ -11,7 +11,8 @@
   {% if request.query_params.get('delivery') == 'sent' %}<div class="alert success">报告已发送。</div>{% endif %}
   <form method="post" action="/reports/{{ report.id }}/send" class="actions" data-disable-on-submit>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label class="inline-field">收件人<input type="email" name="recipient" value="{{ user.email or '' }}" required></label>
+    <label class="inline-field">收件人<input type="email" name="recipient" list="delivery-targets" required placeholder="可输入任意邮箱，或从任务投递目标中选择"></label>
+    {% if delivery_targets %}<datalist id="delivery-targets">{% for target in delivery_targets %}<option value="{{ target.destination }}">{% endfor %}</datalist>{% endif %}
     <button class="primary" type="submit" data-processing-label="发送中…">通过 SMTP 发送</button>
   </form>
   {% if deliveries %}

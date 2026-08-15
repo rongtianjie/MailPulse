@@ -18,7 +18,6 @@ class Base(DeclarativeBase):
 @dataclass(frozen=True)
 class DefaultAdminCredentials:
     username: str
-    email: str | None
     password: str
 
 
@@ -92,14 +91,12 @@ def bootstrap_database(settings: Settings | None = None) -> DefaultAdminCredenti
             default_username,
             settings.default_admin_password,
             settings.default_admin_display_name,
-            email=settings.default_admin_email.strip() or None,
             role="admin",
             must_change_password=True,
         )
         session.commit()
         return DefaultAdminCredentials(
             username=default_username,
-            email=settings.default_admin_email.strip() or None,
             password=settings.default_admin_password,
         )
     except Exception:

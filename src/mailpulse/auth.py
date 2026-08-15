@@ -25,7 +25,6 @@ def create_user(
     username: str,
     password: str,
     display_name: str = "",
-    email: str | None = None,
     role: str = "user",
     must_change_password: bool = False,
 ) -> User:
@@ -34,14 +33,8 @@ def create_user(
     _validate_password(password)
     if session.scalar(select(User).where(User.username == normalized)):
         raise ValueError("用户名已存在")
-    normalized_email = None
-    if email:
-        normalized_email = email.strip().lower()
-        if "@" not in normalized_email:
-            raise ValueError("请输入有效的邮箱格式")
     user = User(
         username=normalized,
-        email=normalized_email,
         display_name=display_name.strip() or normalized,
         password_hash=hash_password(password),
         must_change_password=must_change_password,

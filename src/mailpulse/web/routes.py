@@ -32,6 +32,7 @@ from ..models import (
     Report,
     RuleSet,
     Schedule,
+    ScheduleDeliveryTarget,
     User,
 )
 from ..report_service import ReportService
@@ -246,7 +247,6 @@ def register(
     password: str = Form(...),
     confirm_password: str = Form(""),
     display_name: str = Form(""),
-    email: str = Form(""),
     csrf_token: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -262,13 +262,10 @@ def register(
             error="两次输入的密码不一致",
             username=username,
             display_name=display_name,
-            email=email,
         )
     try:
         # 自助注册只允许创建普通用户，不允许注册管理员账号
-        created = create_user(
-            db, username, password, display_name, email=email.strip() or None, role="user"
-        )
+        created = create_user(db, username, password, display_name, role="user")
         db.add(
             AuditLog(
                 actor_user_id=created.id,
@@ -288,7 +285,6 @@ def register(
             error=f"注册失败：{exc}",
             username=username,
             display_name=display_name,
-            email=email,
         )
     limiter.clear(client_key)
     return RedirectResponse("/login?registered=1", status_code=303)
@@ -438,6 +434,9 @@ def _render_schedule_page(
             "lookback_hours": 24,
             "is_enabled": True,
         }
+    delivery_targets = (
+        list(editing_schedule.delivery_targets) if editing_schedule is not None else []
+    )
     return _render(
         request,
         "schedules.html",
@@ -448,6 +447,7 @@ def _render_schedule_page(
         error=error,
         form=form,
         editing_schedule=editing_schedule,
+        delivery_targets=delivery_targets,
     )
 
 
@@ -581,9 +581,10 @@ def create_schedule(
             name, mailbox_id, rule_set_id, schedule_type, scheduled_time,
             weekdays, custom_cron, timezone, lookback_hours, is_enabled, user, db,
         )
-        db.add(Schedule(user_id=user.id, **values))
+        schedule = Schedule(user_id=user.id, **values)
+        db.add(schedule)
         db.commit()
-        return RedirectResponse("/schedules", status_code=303)
+        return RedirectResponse(f"/schedules/{schedule.id}/edit", status_code=303)
     except ValueError as exc:
         db.rollback()
         submitted = _submitted_schedule_form(
@@ -647,7 +648,7 @@ def update_schedule(
         schedule.lookback_hours = values["lookback_hours"]
         schedule.is_enabled = values["is_enabled"]
         db.commit()
-        return RedirectResponse("/schedules", status_code=303)
+        return RedirectResponse(f"/schedules/{schedule.id}/edit", status_code=303)
     except ValueError as exc:
         db.rollback()
         submitted = _submitted_schedule_form(
@@ -658,6 +659,91 @@ def update_schedule(
             request, user, db, error=f"任务配置无效：{exc}",
             editing_schedule=schedule, submitted=submitted,
         )
+
+
+@router.post("/schedules/{schedule_id}/targets")
+def add_delivery_target(
+    request: Request,
+    schedule_id: int,
+    destination: str = Form(...),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    schedule = db.scalar(
+        select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user.id)
+    )
+    if schedule is None:
+        return HTMLResponse("任务不存在", status_code=404)
+    destination = destination.strip().lower()
+    if "@" not in destination:
+        return _render_schedule_page(
+            request, user, db, error="投递邮箱格式无效", editing_schedule=schedule
+        )
+    if any(item.destination == destination for item in schedule.delivery_targets):
+        return _render_schedule_page(
+            request, user, db, error="该投递邮箱已存在", editing_schedule=schedule
+        )
+    db.add(
+        ScheduleDeliveryTarget(
+            schedule_id=schedule.id, channel="smtp", destination=destination
+        )
+    )
+    db.commit()
+    return RedirectResponse(f"/schedules/{schedule.id}/edit", status_code=303)
+
+
+@router.post("/schedules/{schedule_id}/targets/{target_id}/toggle")
+def toggle_delivery_target(
+    request: Request,
+    schedule_id: int,
+    target_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    target = db.scalar(
+        select(ScheduleDeliveryTarget)
+        .join(Schedule, Schedule.id == ScheduleDeliveryTarget.schedule_id)
+        .where(
+            ScheduleDeliveryTarget.id == target_id,
+            Schedule.id == schedule_id,
+            Schedule.user_id == user.id,
+        )
+    )
+    if target is None:
+        return HTMLResponse("投递目标不存在", status_code=404)
+    target.is_enabled = not target.is_enabled
+    db.commit()
+    return RedirectResponse(f"/schedules/{schedule_id}/edit", status_code=303)
+
+
+@router.post("/schedules/{schedule_id}/targets/{target_id}/delete")
+def delete_delivery_target(
+    request: Request,
+    schedule_id: int,
+    target_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    target = db.scalar(
+        select(ScheduleDeliveryTarget)
+        .join(Schedule, Schedule.id == ScheduleDeliveryTarget.schedule_id)
+        .where(
+            ScheduleDeliveryTarget.id == target_id,
+            Schedule.id == schedule_id,
+            Schedule.user_id == user.id,
+        )
+    )
+    if target is None:
+        return HTMLResponse("投递目标不存在", status_code=404)
+    db.delete(target)
+    db.commit()
+    return RedirectResponse(f"/schedules/{schedule_id}/edit", status_code=303)
 
 
 @router.post("/schedules/{schedule_id}/toggle")
@@ -1097,12 +1183,18 @@ def report_detail(
             .order_by(Delivery.created_at.desc())
         )
     )
+    targets = []
+    if report.schedule_id:
+        schedule = db.get(Schedule, report.schedule_id)
+        if schedule is not None:
+            targets = [item for item in schedule.delivery_targets if item.is_enabled]
     return _render(
         request,
         "report_detail.html",
         user=user,
         report=report,
         deliveries=deliveries,
+        delivery_targets=targets,
         error=request.query_params.get("delivery_error"),
     )
 
@@ -1127,7 +1219,7 @@ def send_report(
         return RedirectResponse(
             f"/reports/{report_id}?delivery_error={quote('SMTP 尚未配置')}", status_code=303
         )
-    recipient = recipient.strip() or (user.email or "")
+    recipient = recipient.strip()
     if not recipient:
         return RedirectResponse(
             f"/reports/{report_id}?delivery_error={quote('请填写报告收件人')}", status_code=303
@@ -1466,7 +1558,6 @@ def create_managed_user(
     display_name: str = Form(""),
     password: str = Form(...),
     role: str = Form("user"),
-    email: str = Form(""),
     csrf_token: str | None = Form(None),
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
@@ -1475,9 +1566,7 @@ def create_managed_user(
     try:
         if role not in {"user", "admin"}:
             raise ValueError("账号角色必须是 user 或 admin")
-        created = create_user(
-            db, username, password, display_name, email=email.strip() or None, role=role
-        )
+        created = create_user(db, username, password, display_name, role=role)
         db.add(
             AuditLog(
                 actor_user_id=user.id,

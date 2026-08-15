@@ -28,7 +28,6 @@ def main() -> None:
         default=None,
         help="管理员用户名，默认使用 MAILPULSE_DEFAULT_ADMIN_USERNAME",
     )
-    init.add_argument("--admin-email", default=None, help="管理员邮箱（可选）")
     init.add_argument("--admin-password", required=True)
     init.add_argument("--display-name", default="系统管理员")
     init.add_argument("--demo", action="store_true", help="同时写入演示邮件")
@@ -97,7 +96,6 @@ def main() -> None:
                 username,
                 args.admin_password,
                 args.display_name,
-                email=args.admin_email,
                 role="admin",
             )
             if args.demo:
@@ -138,8 +136,6 @@ def _log_bootstrap_credentials(bootstrap) -> None:
         console_logger.info("默认管理员账号已存在，未输出密码。")
         return
     console_logger.info("默认管理员用户名: {}", bootstrap.username)
-    if bootstrap.email:
-        console_logger.info("默认管理员邮箱: {}", bootstrap.email)
     console_logger.info("默认管理员密码: {}", bootstrap.password)
     console_logger.info("首次登录后可在账号设置中修改密码。")
 

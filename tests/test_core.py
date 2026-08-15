@@ -42,12 +42,14 @@ from mailpulse.models import (
     Attachment,
     AuditLog,
     CanonicalMessage,
+    Delivery,
     JobRun,
     Mailbox,
     MessageOccurrence,
     ModelBinding,
     Report,
     Schedule,
+    ScheduleDeliveryTarget,
     User,
 )
 from mailpulse.report_service import ReportService
@@ -126,13 +128,11 @@ def test_bootstrap_creates_default_admin_once(tmp_path):
     first = bootstrap_database(settings)
     assert first is not None
     assert first.username == "admin"
-    assert first.email == "admin@mailpulse.local"
     assert first.password == "admin123"
 
     db = build_session_factory(settings)()
     try:
         admin = db.query(User).one()
-        assert admin.email == first.email
         assert admin.role == "admin"
         assert admin.must_change_password is True
         assert authenticate(db, first.username, first.password) is admin
@@ -153,18 +153,16 @@ def test_reset_database_recreates_default_admin(tmp_path):
     assert not database_path.exists()
     recreated = bootstrap_database(settings)
     assert recreated is not None
-    assert recreated.email == "admin@mailpulse.local"
 
 
-def test_create_user_email_is_optional_and_username_has_rules(tmp_path):
+def test_create_user_username_rules(tmp_path):
     settings = make_settings(tmp_path)
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        no_email = create_user(db, "root", "password-123", display_name="运维管理员")
-        assert no_email.username == "root"
-        assert no_email.email is None
-        assert authenticate(db, "ROOT", "password-123") is no_email
+        user = create_user(db, "root", "password-123", display_name="运维管理员")
+        assert user.username == "root"
+        assert authenticate(db, "ROOT", "password-123") is user
         with pytest.raises(ValueError):
             create_user(db, "root", "password-123")
         with pytest.raises(ValueError):
@@ -175,14 +173,6 @@ def test_create_user_email_is_optional_and_username_has_rules(tmp_path):
             create_user(db, "ab", "password-123")
         with pytest.raises(ValueError):
             create_user(db, "a" * 33, "password-123")
-        with pytest.raises(ValueError):
-            create_user(db, "valid-user", "password-123", email="not-an-email")
-        # 邮箱非唯一：多个账号可以共用同一邮箱
-        shared = create_user(db, "second", "password-123", email="shared@example.com")
-        assert shared.email == "shared@example.com"
-        assert create_user(db, "third", "password-123", email="shared@example.com").email == (
-            "shared@example.com"
-        )
     finally:
         db.close()
 
@@ -255,12 +245,12 @@ def test_uidvalidity_change_does_not_duplicate_canonical_message(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "user", "password-123", email="user@example.com")
+        user = create_user(db, "user", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("secret", settings),
         )
         db.add(mailbox)
@@ -269,7 +259,7 @@ def test_uidvalidity_change_does_not_duplicate_canonical_message(tmp_path):
             message_id="<same@example.com>",
             subject="同一封邮件",
             sender="sender@example.com",
-            recipients=[user.email],
+            recipients=["mailbox@example.com"],
             cc=[],
             received_at=datetime.now(UTC),
             body_text="正文",
@@ -299,12 +289,12 @@ def test_sync_deduplicates_identical_messages_in_one_batch(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "batch-dedup", "password-123", email="batch-dedup@example.com")
+        user = create_user(db, "batch-dedup", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("secret", settings),
         )
         db.add(mailbox)
@@ -313,7 +303,7 @@ def test_sync_deduplicates_identical_messages_in_one_batch(tmp_path):
             message_id="<batch-dedup@example.com>",
             subject="批次内重复邮件",
             sender="sender@example.com",
-            recipients=[user.email],
+            recipients=["mailbox@example.com"],
             cc=[],
             received_at=datetime.now(UTC),
             body_text="相同正文",
@@ -377,14 +367,14 @@ def test_search_count_applies_status_filter_with_fts(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "search-status", "password-123", email="search-status@example.com")
+        user = create_user(db, "search-status", "password-123")
         messages = [
             CanonicalMessage(
                 owner_user_id=user.id,
                 content_hash="status-search-1",
                 subject="重要状态通知",
                 sender="sender@example.com",
-                recipients=[user.email],
+                recipients=["mailbox@example.com"],
                 cc=[],
                 body_text="需要处理",
                 local_starred=False,
@@ -394,7 +384,7 @@ def test_search_count_applies_status_filter_with_fts(tmp_path):
                 content_hash="status-search-2",
                 subject="重要状态通知",
                 sender="sender@example.com",
-                recipients=[user.email],
+                recipients=["mailbox@example.com"],
                 cc=[],
                 body_text="已经加星",
                 local_starred=True,
@@ -425,12 +415,12 @@ def test_attachment_limits_quota_count_and_safe_filename(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "quota", "password-123", email="quota@example.com")
+        user = create_user(db, "quota", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("secret", settings),
         )
         db.add(mailbox)
@@ -441,7 +431,7 @@ def test_attachment_limits_quota_count_and_safe_filename(tmp_path):
                 message_id="<quota-1@example.com>",
                 subject="第一封",
                 sender="sender@example.com",
-                recipients=[user.email],
+                recipients=["mailbox@example.com"],
                 cc=[],
                 received_at=datetime.now(UTC),
                 body_text="正文2",
@@ -455,7 +445,7 @@ def test_attachment_limits_quota_count_and_safe_filename(tmp_path):
                 message_id="<quota-2@example.com>",
                 subject="第二封",
                 sender="sender@example.com",
-                recipients=[user.email],
+                recipients=["mailbox@example.com"],
                 cc=[],
                 received_at=datetime.now(UTC),
                 body_text="正文",
@@ -494,13 +484,13 @@ def test_search_falls_back_when_fts_query_is_invalid(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "search", "password-123", email="search@example.com")
+        user = create_user(db, "search", "password-123")
         message = __import__("mailpulse.models", fromlist=["CanonicalMessage"]).CanonicalMessage(
             owner_user_id=user.id,
             content_hash="search-hash",
             subject="搜索测试",
             sender="sender@example.com",
-            recipients=[user.email],
+            recipients=["mailbox@example.com"],
             cc=[],
             body_text="包含搜索关键词",
         )
@@ -520,13 +510,13 @@ def test_message_sync_survives_unavailable_fts_index(tmp_path):
     db = build_session_factory(settings)()
     try:
         user = create_user(
-            db, "search-fallback", "password-123", email="search-fallback@example.com"
+            db, "search-fallback", "password-123"
         )
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("mail-password", settings),
         )
         db.add(mailbox)
@@ -536,7 +526,7 @@ def test_message_sync_survives_unavailable_fts_index(tmp_path):
             message_id="<fts-fallback@example.com>",
             subject="没有 FTS 也要可搜索",
             sender="sender@example.com",
-            recipients=[user.email],
+            recipients=["mailbox@example.com"],
             cc=[],
             received_at=datetime.now(UTC),
             body_text="普通字段查询仍然可以找到这封邮件",
@@ -614,12 +604,12 @@ def test_markitdown_converts_attachment_to_markdown(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "attachment", "password-123", email="attachment@example.com")
+        user = create_user(db, "attachment", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("secret", settings),
         )
         db.add(mailbox)
@@ -628,7 +618,7 @@ def test_markitdown_converts_attachment_to_markdown(tmp_path):
             message_id="<attachment@example.com>",
             subject="附件",
             sender="sender@example.com",
-            recipients=[user.email],
+            recipients=["mailbox@example.com"],
             cc=[],
             received_at=datetime.now(UTC),
             body_text="请读取附件",
@@ -652,7 +642,7 @@ def test_demo_sync_to_report_records_markdown_status_and_audit(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "report", "password-123", email="report@example.com")
+        user = create_user(db, "report", "password-123")
         seed_demo(db, user, settings.data_dir)
         report = ReportService(db, settings).generate_for_user(user, use_demo_provider=True)
         db.commit()
@@ -866,12 +856,12 @@ def test_model_profile_global_binding_is_resolved(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "profile", "password-123", email="profile@example.com")
+        user = create_user(db, "profile", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("secret", settings),
         )
         profile = AIProviderProfile(
@@ -919,12 +909,12 @@ def test_worker_persists_safe_failure_state(tmp_path, monkeypatch):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "worker", "password-123", email="worker@example.com")
+        user = create_user(db, "worker", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("worker-secret", settings),
         )
         db.add(mailbox)
@@ -959,6 +949,221 @@ def test_worker_persists_safe_failure_state(tmp_path, monkeypatch):
         db.close()
 
 
+def test_deliver_to_targets_sends_to_enabled_targets_only(tmp_path):
+    from mailpulse.worker import _deliver_to_targets
+
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "worker", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="inbox@example.com",
+            imap_host="fake",
+            smtp_host="fake-smtp",
+            username="worker",
+            credential_encrypted=encrypt_secret("worker-secret", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        schedule = Schedule(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            cron_expression="0 9 * * *",
+            timezone="UTC",
+        )
+        db.add(schedule)
+        db.flush()
+        enabled = ScheduleDeliveryTarget(
+            schedule_id=schedule.id, destination="boss@example.com"
+        )
+        disabled = ScheduleDeliveryTarget(
+            schedule_id=schedule.id, destination="archive@example.com", is_enabled=False
+        )
+        db.add_all([enabled, disabled])
+        db.flush()
+        report = Report(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            schedule_id=schedule.id,
+            run_key="manual:deliver-to-targets",
+            period_start=datetime.now(UTC) - timedelta(hours=1),
+            period_end=datetime.now(UTC),
+            status="success",
+        )
+        db.add(report)
+        db.flush()
+
+        class FakeDeliveryService:
+            def __init__(self, session):
+                self.session = session
+                self.sent: list[str] = []
+
+            def send_report(self, report, mailbox, recipient):
+                self.sent.append(recipient)
+                delivery = Delivery(
+                    report_id=report.id,
+                    channel="smtp",
+                    destination=recipient,
+                    status="sent",
+                )
+                self.session.add(delivery)
+                self.session.flush()
+                return delivery
+
+            def retry_delivery(self, delivery, report, mailbox):
+                delivery.status = "sent"
+                return delivery
+
+        service = FakeDeliveryService(db)
+        _deliver_to_targets(db, service, report, schedule, mailbox)
+        assert service.sent == ["boss@example.com"]
+        assert db.query(Delivery).count() == 1
+        # 已发送的目标不会重复投递
+        _deliver_to_targets(db, service, report, schedule, mailbox)
+        assert service.sent == ["boss@example.com"]
+        assert db.query(Delivery).count() == 1
+
+        # 未配置任何启用目标时报错
+        enabled.is_enabled = False
+        db.commit()
+        with pytest.raises(RuntimeError, match="未配置报告投递目标"):
+            _deliver_to_targets(db, service, report, schedule, mailbox)
+    finally:
+        db.close()
+
+
+def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "target-crud-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "tester", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="inbox@example.com",
+            imap_host="fake",
+            smtp_host="fake-smtp",
+            username="tester",
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.commit()
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "tester", "password": "password-123", "csrf_token": token},
+    )
+    schedules_page = client.get("/schedules")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', schedules_page.text).group(1)
+    created = client.post(
+        "/schedules",
+        data={
+            "name": "日报",
+            "mailbox_id": str(mailbox.id),
+            "schedule_type": "daily",
+            "scheduled_time": "09:00",
+            "weekdays": "mon-fri",
+            "timezone": "Asia/Shanghai",
+            "lookback_hours": "24",
+            "is_enabled": "on",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    edit_path = created.headers["location"]
+    assert edit_path.startswith("/schedules/")
+    schedule_id = int(edit_path.split("/")[2])
+    targets_path = f"/schedules/{schedule_id}/targets"
+    edit_page = client.get(edit_path)
+    assert "报告投递目标" in edit_page.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+
+    added = client.post(
+        targets_path,
+        data={"destination": "boss@example.com", "csrf_token": token},
+        follow_redirects=False,
+    )
+    assert added.status_code == 303
+    duplicate = client.post(
+        targets_path,
+        data={"destination": "BOSS@example.com", "csrf_token": token},
+    )
+    assert "该投递邮箱已存在" in duplicate.text
+    invalid = client.post(
+        targets_path,
+        data={"destination": "not-an-email", "csrf_token": token},
+    )
+    assert "投递邮箱格式无效" in invalid.text
+
+    db = build_session_factory(settings)()
+    try:
+        target = db.query(ScheduleDeliveryTarget).one()
+        assert target.destination == "boss@example.com"
+        assert target.channel == "smtp"
+        assert target.is_enabled is True
+        schedule_id = target.schedule_id
+        report = Report(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            schedule_id=schedule_id,
+            run_key="manual:target-report",
+            period_start=datetime.now(UTC) - timedelta(hours=1),
+            period_end=datetime.now(UTC),
+            status="success",
+        )
+        db.add(report)
+        db.commit()
+        report_id = report.id
+    finally:
+        db.close()
+
+    # 报告页收件人输入框提供任务投递目标作为下拉建议
+    detail_page = client.get(f"/reports/{report_id}")
+    assert 'list="delivery-targets"' in detail_page.text
+    assert 'value="boss@example.com"' in detail_page.text
+
+    # 停用与删除投递目标
+    edit_page = client.get(edit_path)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+    toggled = client.post(
+        f"{targets_path}/1/toggle",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert toggled.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        assert db.get(ScheduleDeliveryTarget, 1).is_enabled is False
+    finally:
+        db.close()
+    edit_page = client.get(edit_path)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+    deleted = client.post(
+        f"{targets_path}/1/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        assert db.query(ScheduleDeliveryTarget).count() == 0
+    finally:
+        db.close()
+
+
 class FakeDeliveryProvider:
     def __init__(self, error: bool = False):
         self.error = error
@@ -975,13 +1180,13 @@ def test_report_delivery_records_failure_and_retry(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "delivery", "password-123", email="delivery@example.com")
+        user = create_user(db, "delivery", "password-123")
         mailbox = Mailbox(
             user_id=user.id,
-            email_address=user.email,
+            email_address="mailbox@example.com",
             imap_host="fake",
             smtp_host="fake-smtp",
-            username=user.email,
+            username="mailbox@example.com",
             credential_encrypted=encrypt_secret("smtp-secret", settings),
         )
         db.add(mailbox)
@@ -1024,8 +1229,8 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     app = create_app()
     settings = get_settings()
     db = build_session_factory(settings)()
-    admin = create_user(db, "sysadmin", "password-123", role="admin", email="admin@example.com")
-    user = create_user(db, "web", "password-123", email="web@example.com")
+    admin = create_user(db, "sysadmin", "password-123", role="admin")
+    user = create_user(db, "web", "password-123")
     db.commit()
     db.close()
     admin_client = TestClient(app)
@@ -1059,7 +1264,6 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         data={
             "username": "managed",
             "display_name": "受管用户",
-            "email": "managed@example.com",
             "password": "Managed-pass-123",
             "role": "user",
             "csrf_token": admin_token,
@@ -1068,7 +1272,7 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     )
     assert created_user_response.status_code == 303
     assert created_user_response.headers["location"] == "/admin/users"
-    assert "managed@example.com" in admin_client.get("/admin/users").text
+    assert "managed" in admin_client.get("/admin/users").text
     model_page = admin_client.get("/admin/models")
     model_token = re.search(r'name="csrf_token" value="([^"]+)"', model_page.text).group(1)
     model_response = admin_client.post(
@@ -1180,7 +1384,7 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         assert saved_schedule.cron_expression == "30 9 * * mon-fri"
         assert saved_schedule.is_enabled is True
         report_id = verify_db.query(Report).one().id
-        other_user = create_user(verify_db, "other", "password-123", email="other@example.com")
+        other_user = create_user(verify_db, "other", "password-123")
         verify_db.commit()
     finally:
         verify_db.close()
@@ -1214,7 +1418,6 @@ def test_self_registration_creates_regular_user_only(tmp_path, monkeypatch):
         data={
             "username": "newbie",
             "display_name": "新用户",
-            "email": "newbie@example.com",
             "password": "password-123",
             "confirm_password": "password-123",
             "role": "admin",
@@ -1230,7 +1433,6 @@ def test_self_registration_creates_regular_user_only(tmp_path, monkeypatch):
         created = db.query(User).filter(User.username == "newbie").one()
         assert created.role == "user"
         assert created.display_name == "新用户"
-        assert created.email == "newbie@example.com"
         assert authenticate(db, created.username, "password-123") is created
         audit = db.query(AuditLog).filter(AuditLog.action == "user_register").one()
         assert audit.target_id == str(created.id)
@@ -1296,18 +1498,6 @@ def test_self_registration_rejects_invalid_submissions(tmp_path, monkeypatch):
         },
     )
     assert "用户名仅支持 3-32 位字母、数字、下划线、连字符或点" in bad_username.text
-
-    bad_email = client.post(
-        "/register",
-        data={
-            "username": "newbie2",
-            "email": "not-an-email",
-            "password": "password-123",
-            "confirm_password": "password-123",
-            "csrf_token": token,
-        },
-    )
-    assert "请输入有效的邮箱格式" in bad_email.text
 
     created = client.post(
         "/register",

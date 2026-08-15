@@ -49,7 +49,7 @@ def demo_messages() -> list[RawMessage]:
 def seed_demo(session: Session, user: User, data_dir: Path) -> int:
     mailbox = session.scalar(select(Mailbox).where(Mailbox.user_id == user.id))
     if mailbox is None:
-        demo_email = user.email or f"{user.username}@demo.local"
+        demo_email = f"{user.username}@demo.local"
         mailbox = Mailbox(
             user_id=user.id,
             name="演示邮箱",

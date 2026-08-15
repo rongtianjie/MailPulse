@@ -40,7 +40,7 @@ Worker ────────┘
 
 ## 4. 权限与数据范围
 
-应用使用本地账号和 Session 认证。账号以用户名（`users.username`，全局唯一、大小写不敏感）作为登录标识，邮箱（`users.email`）只是用户的可选属性，不参与登录；管理员和普通用户使用不同的网页布局与路由组：
+应用使用本地账号和 Session 认证。账号以用户名（`users.username`，全局唯一、大小写不敏感）作为登录标识，账号不绑定邮箱。收件邮箱（IMAP 账户）与报告投递邮箱分离：任务通过 `mailboxes` 关联收件邮箱，报告投递目标由 `schedule_delivery_targets` 表按任务配置（每个任务可配置多个投递目标，支持后续扩展多种投递方式）。管理员和普通用户使用不同的网页布局与路由组：
 
 - 登录入口：`/login`；健康检查：`/healthz`。
 - 管理员路由：`/admin`、`/admin/users`、`/admin/models`、`/admin/jobs`、`/admin/account/password`。

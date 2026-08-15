@@ -30,9 +30,30 @@
       <li>回看时间只决定首次运行或长时间未运行时的报告时间范围。</li>
       <li>服务重启后的补跑使用上次成功时间到当前时间，并用唯一运行键避免重复报告。</li>
       <li>邮箱默认以只读方式同步，任务不会修改服务器端已读、星标或文件夹状态。</li>
+      <li>报告投递目标与收件邮箱相互独立：任务从关联邮箱收取邮件，报告发送到配置的投递目标。</li>
     </ul>
   </div>
 </section>
+{% if editing_schedule %}
+<section class="card">
+  <div class="section-heading"><h2>报告投递目标</h2><span class="muted">定时报告将发送到所有启用的目标</span></div>
+  {% if delivery_targets %}
+  <div class="list">
+    {% for target in delivery_targets %}
+    <div class="list-item">
+      <span>{{ target.destination }}<small>{{ target.channel }}{% if not target.is_enabled %} · 已停用{% endif %}</small></span>
+      <span class="actions"><span class="tag {{ 'success' if target.is_enabled else 'muted' }}">{{ '启用' if target.is_enabled else '停用' }}</span><form method="post" action="/schedules/{{ editing_schedule.id }}/targets/{{ target.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if target.is_enabled else '启用' }}</button></form><form method="post" action="/schedules/{{ editing_schedule.id }}/targets/{{ target.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">尚未配置投递目标，定时报告不会自动发送。</p>{% endif %}
+  <form method="post" action="/schedules/{{ editing_schedule.id }}/targets" class="actions" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="inline-field">投递邮箱<input type="email" name="destination" placeholder="如 boss@example.com" required></label>
+    <button class="primary" type="submit" data-processing-label="添加中…">添加投递目标</button>
+  </form>
+</section>
+{% endif %}
 <section class="card">
   <div class="section-heading"><h2>已有任务</h2></div>
   {% if schedules %}

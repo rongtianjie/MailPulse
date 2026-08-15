@@ -1,4 +1,4 @@
-# MailPulse
+uv run mailpulse reset-db --confirm# MailPulse
 
 MailPulse 是面向公司内网的多用户邮件归纳整理工具。系统通过 IMAP 只读同步邮件，使用确定性规则筛选内容，再调用可配置的 AI 模型生成结构化报告，并通过网页和 SMTP 提供结果。
 
@@ -79,7 +79,6 @@ uv run mailpulse reset-db --confirm
 ```bash
 uv run mailpulse init \
   --admin-username admin \
-  --admin-email admin@example.com \
   --admin-password 'change-this-password'
 ```
 

@@ -19,7 +19,6 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    email: Mapped[str | None] = mapped_column(String(320), nullable=True, index=True)
     display_name: Mapped[str] = mapped_column(String(120), default="")
     password_hash: Mapped[str] = mapped_column(String(512))
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -180,6 +179,32 @@ class Schedule(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    delivery_targets: Mapped[list[ScheduleDeliveryTarget]] = relationship(
+        back_populates="schedule", cascade="all, delete-orphan"
+    )
+
+
+class ScheduleDeliveryTarget(Base):
+    """A report delivery destination configured per schedule.
+
+    A schedule may deliver its reports to multiple targets (channels); the
+    mailbox address is the receive-side (IMAP) account and is deliberately
+    kept separate from these send-side destinations.
+    """
+
+    __tablename__ = "schedule_delivery_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(
+        ForeignKey("schedules.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(32), default="smtp")
+    destination: Mapped[str] = mapped_column(String(320))
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    schedule: Mapped[Schedule] = relationship(back_populates="delivery_targets")
 
 
 class AIProviderProfile(Base):
