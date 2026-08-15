@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}注册 - MailPulse{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <h1>注册 MailPulse 账号</h1>
+  <p class="muted">注册后将使用普通用户身份登录，管理员账号由系统管理员创建。</p>
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+  <form method="post" action="/register" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>用户名（3-32 位字母、数字、_ - .）<input type="text" name="username" value="{{ username or '' }}" required autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+    <label>显示名称（可选）<input type="text" name="display_name" value="{{ display_name or '' }}" maxlength="120" autocomplete="nickname"></label>
+    <label>邮箱（可选）<input type="email" name="email" value="{{ email or '' }}" autocomplete="email"></label>
+    <label>密码（至少 8 个字符）<input type="password" name="password" required autocomplete="new-password"></label>
+    <label>确认密码<input type="password" name="confirm_password" required autocomplete="new-password"></label>
+    <button class="primary" type="submit">注册</button>
+  </form>
+  <p class="muted auth-switch">已有账号？<a href="/login" class="button secondary">返回登录</a></p>
+</section>
+{% endblock %}

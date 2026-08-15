@@ -4,13 +4,18 @@
 <section class="auth-card">
   <h1>登录 MailPulse</h1>
   <p class="muted">公司内网邮件归纳整理工具</p>
+  {% if notice %}<div class="alert success">注册成功，请使用新账号登录。</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
   <form method="post" action="/login" class="stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>账号<input type="email" name="email" required autocomplete="username"></label>
-    <label>密码<input type="password" name="password" required autocomplete="current-password"></label>
-    <label class="check"><input type="checkbox" name="remember_me" value="true"> <span>记住登录状态</span></label>
+    <label>用户名<input type="text" name="username" value="{{ username or saved_username or '' }}" required autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+    <label>密码<input type="password" name="password" value="{{ saved_password or '' }}" required autocomplete="current-password"></label>
+    <div class="checks-row">
+      <label class="check"><input type="checkbox" name="remember_me" value="true" {% if remember_me %}checked{% endif %}> <span>记住登录状态</span></label>
+      <label class="check"><input type="checkbox" name="remember_password" value="true" {% if remember_password %}checked{% endif %}> <span>记住密码</span></label>
+    </div>
     <button class="primary" type="submit">登录</button>
   </form>
+  <p class="muted auth-switch">还没有账号？<a href="/register" class="button secondary">注册新账号</a></p>
 </section>
 {% endblock %}

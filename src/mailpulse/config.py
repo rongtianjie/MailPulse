@@ -29,7 +29,10 @@ class Settings(BaseSettings):
     log_retention: str = "30 days"
     session_cookie: str = "mailpulse_session"
     remember_me_days: int = Field(default=30, ge=1, le=365)
+    remember_password_days: int = Field(default=30, ge=1, le=365)
     session_https_only: bool = False
+    default_admin_username: str = "admin"
+    # 邮箱仅是用户的可选属性；默认管理员可不配置邮箱。
     default_admin_email: str = "admin@mailpulse.local"
     default_admin_password: str = Field(default="admin123", min_length=8)
     default_admin_display_name: str = "系统管理员"

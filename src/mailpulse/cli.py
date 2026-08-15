@@ -23,7 +23,12 @@ def main() -> None:
     serve.add_argument("--reload", action="store_true")
 
     init = subparsers.add_parser("init", help="初始化数据库和管理员账号")
-    init.add_argument("--admin-email", required=True)
+    init.add_argument(
+        "--admin-username",
+        default=None,
+        help="管理员用户名，默认使用 MAILPULSE_DEFAULT_ADMIN_USERNAME",
+    )
+    init.add_argument("--admin-email", default=None, help="管理员邮箱（可选）")
     init.add_argument("--admin-password", required=True)
     init.add_argument("--display-name", default="系统管理员")
     init.add_argument("--demo", action="store_true", help="同时写入演示邮件")
@@ -33,10 +38,10 @@ def main() -> None:
     reset.add_argument("--confirm", action="store_true", help="确认删除当前数据库")
 
     seed = subparsers.add_parser("seed-demo", help="为指定用户写入演示邮件")
-    seed.add_argument("--user-email", required=True)
+    seed.add_argument("--username", required=True)
 
     run_once = subparsers.add_parser("run-once", help="为指定用户生成一次报告")
-    run_once.add_argument("--user-email", required=True)
+    run_once.add_argument("--username", required=True)
     run_once.add_argument("--demo-ai", action="store_true")
     subparsers.add_parser("worker", help="启动后台任务 worker")
 
@@ -86,16 +91,22 @@ def main() -> None:
     db = factory()
     try:
         if args.command == "init":
+            username = args.admin_username or settings.default_admin_username
             user = create_user(
-                db, args.admin_email, args.admin_password, args.display_name, role="admin"
+                db,
+                username,
+                args.admin_password,
+                args.display_name,
+                email=args.admin_email,
+                role="admin",
             )
             if args.demo:
                 seed_demo(db, user, settings.data_dir)
             db.commit()
-            logger.info("已创建管理员: {}", user.email)
+            logger.info("已创建管理员: {}", user.username)
             return
         if args.command == "seed-demo":
-            user = db.query(User).filter(User.email == args.user_email.strip().lower()).one()
+            user = db.query(User).filter(User.username == args.username.strip().lower()).one()
             created = seed_demo(db, user, settings.data_dir)
             db.commit()
             logger.info("已写入演示邮件: {} 封", created)
@@ -103,7 +114,7 @@ def main() -> None:
         if args.command == "run-once":
             from .report_service import ReportService
 
-            user = db.query(User).filter(User.email == args.user_email.strip().lower()).one()
+            user = db.query(User).filter(User.username == args.username.strip().lower()).one()
             report = ReportService(db, settings).generate_for_user(
                 user, use_demo_provider=args.demo_ai
             )
@@ -126,7 +137,9 @@ def _log_bootstrap_credentials(bootstrap) -> None:
     if bootstrap is None:
         console_logger.info("默认管理员账号已存在，未输出密码。")
         return
-    console_logger.info("默认管理员邮箱: {}", bootstrap.email)
+    console_logger.info("默认管理员用户名: {}", bootstrap.username)
+    if bootstrap.email:
+        console_logger.info("默认管理员邮箱: {}", bootstrap.email)
     console_logger.info("默认管理员密码: {}", bootstrap.password)
     console_logger.info("首次登录后可在账号设置中修改密码。")
 

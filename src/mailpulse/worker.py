@@ -192,6 +192,9 @@ def _run_schedule(
             elif delivery:
                 delivery = service.retry_delivery(delivery, report, mailbox)
             else:
+                if not user.email:
+                    session.commit()
+                    raise RuntimeError("用户未配置邮箱，无法自动投递报告，请在报告页面手动发送")
                 delivery = service.send_report(report, mailbox, user.email)
             if delivery.status != "sent":
                 session.commit()

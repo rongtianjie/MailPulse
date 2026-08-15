@@ -25,6 +25,8 @@ cp .env.example .env
 
 `MAILPULSE_ENVIRONMENT` 用于标识运行环境。设置为 `development` 时使用开发环境规则；设置为 `production` 或 `prod` 时，应用会要求显式配置 `MAILPULSE_SECRET_KEY` 和 `MAILPULSE_CREDENTIAL_KEY`。该配置只影响环境标识和密钥校验，不会自动切换数据库、日志或其他服务实现。
 
+默认配置使用 `MAILPULSE_DATA_DIR` 下的文件型 SQLite 数据库、附件目录、MarkItDown 转换目录和日志目录。可以通过 `MAILPULSE_DATABASE_URL` 提供其他 SQLAlchemy 数据库 URL，但当前 CLI 的 `reset-db` 只支持文件型 SQLite，部署与备份流程也按 SQLite 编写。
+
 生产环境必须替换：
 
 - `MAILPULSE_SECRET_KEY`
@@ -33,14 +35,18 @@ cp .env.example .env
 两个密钥应使用不同的随机值。`.env` 不得提交到版本库。
 
 日志默认输出到控制台，并写入 `var/logs/mailpulse.log`，每天零点轮转。可通过 `MAILPULSE_LOG_LEVEL`、`MAILPULSE_LOG_ROTATION` 和 `MAILPULSE_LOG_RETENTION` 调整级别、轮转时间和保留策略。默认管理员密码仅输出到控制台，不写入日志文件。
-登录页面的“记住登录状态”只延长签名 Session Cookie 的有效期，默认保留 30 天，不保存密码。
+登录页面的“记住登录状态”只延长签名 Session Cookie 的有效期，默认保留 30 天，不保存密码。“记住密码”会把账号和密码使用凭据密钥加密后存入独立的 HttpOnly Cookie（默认保留 30 天，由 `MAILPULSE_REMEMBER_PASSWORD_DAYS` 控制），仅用于下次打开登录页时预填账号与密码，并在取消勾选登录时清除；启用 `MAILPULSE_SESSION_HTTPS_ONLY` 后该 Cookie 同样只通过 HTTPS 发送。
+
+配置读取优先级为：`serve` 的 `--host`/`--port` 命令行参数 > 环境变量 > `.env` > 代码默认值；其他配置为环境变量 > `.env` > 代码默认值。`MAILPULSE_SESSION_HTTPS_ONLY` 用于控制 Session Cookie 是否仅通过 HTTPS 发送，HTTPS 部署应设为 `true`。`MAILPULSE_EXTERNAL_AI_ALLOWED` 默认为 `false`，用于阻止未经明确许可的外部 AI 内容发送。
+
+AI 的环境变量回退配置包括 Primary 与可选 Vision 服务地址、模型名称、API Key 和能力声明；`MAILPULSE_AI_TIMEOUT_SECONDS`、`MAILPULSE_AI_MAX_OUTPUT_TOKENS`、`MAILPULSE_AI_MAX_INPUT_CHARS`、`MAILPULSE_AI_MAX_RETRIES`、`MAILPULSE_MAX_MESSAGES_PER_REPORT` 控制默认运行限制。附件同步还受单文件大小、单封邮件附件数量、用户/全局存储配额以及图片资源限制控制，完整变量列表和默认值见 `.env.example`。
 
 ## 3. 初始化与启动
 
-首次启动服务时会自动执行数据库迁移，并在数据库中没有管理员账号时创建默认管理员。默认登录信息为：
+首次启动服务时会自动创建数据库表结构，并在数据库中没有管理员账号时创建默认管理员。默认登录信息为：
 
 ```text
-登录邮箱：admin@mailpulse.local
+登录用户名：admin
 登录密码：admin123
 ```
 
@@ -51,6 +57,8 @@ uv run mailpulse serve
 ```
 
 服务仅在首次创建默认管理员时打印登录信息。首次登录后会进入密码设置页面，可以修改密码，也可以暂时跳过。
+
+登录页面提供“注册新账号”入口，普通员工可自助注册普通用户账号（角色固定为 `user`，注册接口不接受管理员角色）。用户名是账号的唯一登录标识（3-32 位字母、数字、下划线、连字符或点），邮箱仅是可选属性，注册和创建账号时都可以不填。管理员账号只能由管理员在“系统管理 → 用户管理”中创建，或通过 `init` 命令创建。
 
 `serve` 默认读取 `.env` 中的 `MAILPULSE_HOST` 和 `MAILPULSE_PORT`；命令行提供的 `--host` 或 `--port` 会临时覆盖对应配置。
 启动日志会输出实际使用的监听地址，以及 host/port 的配置来源（命令行、`.env`、环境变量或代码默认值）。
@@ -65,9 +73,12 @@ uv run mailpulse init-db
 
 ```bash
 uv run mailpulse init \
+  --admin-username admin \
   --admin-email admin@example.com \
   --admin-password 'change-this-password'
 ```
+
+邮箱是用户的可选属性，`--admin-email` 可以不提供；用户名默认取 `MAILPULSE_DEFAULT_ADMIN_USERNAME`。
 
 需要重置本地 SQLite 数据库时，必须显式确认：
 
@@ -83,11 +94,7 @@ uv run mailpulse reset-db --confirm
 uv run mailpulse worker
 ```
 
-应用启动、`init-db` 和 `init` 命令会执行数据库迁移。需要显式迁移时使用：
-
-```bash
-uv run alembic upgrade head
-```
+应用启动、`init-db` 和 `init` 命令会自动创建数据库表结构（`create_all`），不维护版本化迁移。开发阶段修改数据库模型后，用 `reset-db` 重置本地数据库（破坏性操作，会删除全部数据）。
 
 ## 4. 模型服务配置
 
@@ -115,7 +122,6 @@ uv run alembic upgrade head
 ```bash
 uv run pytest
 uv run ruff check .
-uv run alembic check
 uv run python -m mailpulse --help
 ```
 
@@ -131,6 +137,6 @@ curl http://127.0.0.1:8080/healthz
 - 邮箱同步失败：在邮箱设置中验证 IMAP 主机、端口、用户名、密码和 TLS 配置。
 - 报告生成失败：检查模型 Base URL、模型名称、能力声明、上下文限制和服务日志。
 - 报告投递失败：验证 SMTP 主机、端口、TLS 和收件人配置。
-- 数据库结构不一致：执行 `uv run alembic check`，按迁移流程处理，不要直接修改 SQLite 表结构。
+- 数据库结构不一致：开发阶段模型变更后直接使用 `uv run mailpulse reset-db --confirm` 重置本地数据库，不要直接手工修改 SQLite 表结构。
 
 测试使用 Fake Provider，不依赖真实公司邮箱、SMTP 或模型服务。目标环境的外部连接必须单独验收。

@@ -22,7 +22,7 @@ def create_app() -> FastAPI:
     if bootstrap is not None:
         console_logger = logger.bind(console_only=True)
         console_logger.info("MailPulse 已初始化默认管理员账号")
-        console_logger.info("默认管理员邮箱: {}", bootstrap.email)
+        console_logger.info("默认管理员用户名: {}", bootstrap.username)
         console_logger.info("默认管理员密码: {}", bootstrap.password)
         console_logger.info("首次登录后可在账号设置中修改密码。")
     app = FastAPI(title="MailPulse", version="0.1.0")

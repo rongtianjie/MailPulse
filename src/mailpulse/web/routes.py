@@ -41,13 +41,45 @@ from ..security import decrypt_secret, encrypt_secret
 from ..worker import build_cron_expression, validate_schedule
 from .csrf import get_csrf_token, validate_csrf
 from .deps import admin_user, current_user, get_db
-from .rate_limit import get_login_rate_limiter
+from .rate_limit import get_login_rate_limiter, get_register_rate_limiter
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 router = APIRouter()
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 MESSAGES_PAGE_SIZE = 50
+REMEMBER_PASSWORD_COOKIE = "mailpulse_remember_credentials"
+
+
+def _remember_password_saved(request: Request, settings) -> tuple[str, str] | None:
+    """Return (username, password) saved by the remember-password cookie, or None."""
+    payload = request.cookies.get(REMEMBER_PASSWORD_COOKIE)
+    if not payload:
+        return None
+    try:
+        value = decrypt_secret(payload, settings)
+    except ValueError:
+        return None
+    username, separator, password = value.partition("\n")
+    if not separator or not username or not password:
+        return None
+    return username, password
+
+
+def _set_remember_password_cookie(response, username: str, password: str, settings) -> None:
+    response.set_cookie(
+        REMEMBER_PASSWORD_COOKIE,
+        encrypt_secret(f"{username}\n{password}", settings),
+        max_age=settings.remember_password_days * 24 * 60 * 60,
+        httponly=True,
+        samesite="lax",
+        secure=settings.session_https_only,
+        path="/",
+    )
+
+
+def _clear_remember_password_cookie(response) -> None:
+    response.delete_cookie(REMEMBER_PASSWORD_COOKIE, path="/")
 
 
 def _fmt_time(value, tz: str = DEFAULT_TIMEZONE) -> str:
@@ -96,6 +128,35 @@ def _login_redirect(user: User) -> str:
     return "/"
 
 
+def _login_page_context(
+    request: Request,
+    *,
+    error: str | None,
+    notice: str | None = None,
+    username: str | None = None,
+    remember_me: bool = False,
+    remember_password: bool = False,
+) -> dict:
+    """Build the login template context, prefilling saved credentials when present."""
+    settings = get_settings()
+    saved = _remember_password_saved(request, settings)
+    saved_username = saved[0] if saved else None
+    saved_password = (
+        saved[1]
+        if saved and (username is None or saved[0] == username.strip().lower())
+        else None
+    )
+    return {
+        "error": error,
+        "notice": notice,
+        "username": username,
+        "saved_username": saved_username,
+        "saved_password": saved_password,
+        "remember_me": remember_me,
+        "remember_password": remember_password or bool(saved_password),
+    }
+
+
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)):
     user_id = request.session.get("user_id")
@@ -104,15 +165,20 @@ def login_page(request: Request, db: Session = Depends(get_db)):
         if user and user.is_active:
             return RedirectResponse(_login_redirect(user), status_code=303)
         request.session.clear()
-    return _render(request, "login.html", error=None)
+    return _render(
+        request,
+        "login.html",
+        **_login_page_context(request, error=None, notice=request.query_params.get("registered")),
+    )
 
 
 @router.post("/login", response_class=HTMLResponse)
 def login(
     request: Request,
-    email: str = Form(...),
+    username: str = Form(...),
     password: str = Form(...),
     remember_me: bool = Form(False),
+    remember_password: bool = Form(False),
     csrf_token: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
@@ -120,11 +186,25 @@ def login(
     limiter = get_login_rate_limiter()
     client_key = request.client.host if request.client else "unknown"
     if not limiter.allowed(client_key):
-        return _render(request, "login.html", error="登录尝试过于频繁，请稍后再试")
-    user = authenticate(db, email, password)
+        return _render(
+            request,
+            "login.html",
+            **_login_page_context(
+                request, error="登录尝试过于频繁，请稍后再试", username=username,
+                remember_me=remember_me, remember_password=remember_password,
+            ),
+        )
+    user = authenticate(db, username, password)
     if user is None:
         limiter.record_failure(client_key)
-        return _render(request, "login.html", error="账号或密码错误")
+        return _render(
+            request,
+            "login.html",
+            **_login_page_context(
+                request, error="账号或密码错误", username=username,
+                remember_me=remember_me, remember_password=remember_password,
+            ),
+        )
     limiter.clear(client_key)
     request.session.clear()
     request.session["user_id"] = user.id
@@ -133,7 +213,12 @@ def login(
         AuditLog(actor_user_id=user.id, action="login", target_type="user", target_id=str(user.id))
     )
     db.commit()
-    return RedirectResponse(_login_redirect(user), status_code=303)
+    response = RedirectResponse(_login_redirect(user), status_code=303)
+    if remember_password:
+        _set_remember_password_cookie(response, user.username, password, get_settings())
+    else:
+        _clear_remember_password_cookie(response)
+    return response
 
 
 @router.post("/logout")
@@ -141,6 +226,72 @@ def logout(request: Request, csrf_token: str | None = Form(None)):
     validate_csrf(request, csrf_token)
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
+
+
+@router.get("/register", response_class=HTMLResponse)
+def register_page(request: Request, db: Session = Depends(get_db)):
+    user_id = request.session.get("user_id")
+    if user_id:
+        user = db.get(User, int(user_id))
+        if user and user.is_active:
+            return RedirectResponse(_login_redirect(user), status_code=303)
+        request.session.clear()
+    return _render(request, "register.html", error=None)
+
+
+@router.post("/register", response_class=HTMLResponse)
+def register(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    confirm_password: str = Form(""),
+    display_name: str = Form(""),
+    email: str = Form(""),
+    csrf_token: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    limiter = get_register_rate_limiter()
+    client_key = request.client.host if request.client else "unknown"
+    if not limiter.allowed(client_key):
+        return _render(request, "register.html", error="注册尝试过于频繁，请稍后再试")
+    if password != confirm_password:
+        return _render(
+            request,
+            "register.html",
+            error="两次输入的密码不一致",
+            username=username,
+            display_name=display_name,
+            email=email,
+        )
+    try:
+        # 自助注册只允许创建普通用户，不允许注册管理员账号
+        created = create_user(
+            db, username, password, display_name, email=email.strip() or None, role="user"
+        )
+        db.add(
+            AuditLog(
+                actor_user_id=created.id,
+                action="user_register",
+                target_type="user",
+                target_id=str(created.id),
+                metadata_json={"role": created.role},
+            )
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        limiter.record_failure(client_key)
+        return _render(
+            request,
+            "register.html",
+            error=f"注册失败：{exc}",
+            username=username,
+            display_name=display_name,
+            email=email,
+        )
+    limiter.clear(client_key)
+    return RedirectResponse("/login?registered=1", status_code=303)
 
 
 @router.get("/admin/account/password", response_class=HTMLResponse)
@@ -976,10 +1127,13 @@ def send_report(
         return RedirectResponse(
             f"/reports/{report_id}?delivery_error={quote('SMTP 尚未配置')}", status_code=303
         )
-    try:
-        delivery = ReportDeliveryService(db).send_report(
-            report, mailbox, recipient.strip() or user.email
+    recipient = recipient.strip() or (user.email or "")
+    if not recipient:
+        return RedirectResponse(
+            f"/reports/{report_id}?delivery_error={quote('请填写报告收件人')}", status_code=303
         )
+    try:
+        delivery = ReportDeliveryService(db).send_report(report, mailbox, recipient)
         db.commit()
         return RedirectResponse(f"/reports/{report_id}?delivery={delivery.status}", status_code=303)
     except ValueError as exc:
@@ -1308,10 +1462,11 @@ def _model_form_defaults(profile: AIProviderProfile | None, db: Session | None =
 @router.post("/admin/users", response_class=HTMLResponse)
 def create_managed_user(
     request: Request,
-    email: str = Form(...),
+    username: str = Form(...),
     display_name: str = Form(""),
     password: str = Form(...),
     role: str = Form("user"),
+    email: str = Form(""),
     csrf_token: str | None = Form(None),
     user: User = Depends(admin_user),
     db: Session = Depends(get_db),
@@ -1320,7 +1475,9 @@ def create_managed_user(
     try:
         if role not in {"user", "admin"}:
             raise ValueError("账号角色必须是 user 或 admin")
-        created = create_user(db, email, password, display_name, role=role)
+        created = create_user(
+            db, username, password, display_name, email=email.strip() or None, role=role
+        )
         db.add(
             AuditLog(
                 actor_user_id=user.id,

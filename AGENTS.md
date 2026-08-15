@@ -11,7 +11,6 @@ MailPulse 是一个供公司内网使用的多用户邮件归纳整理工具。�
 - `src/mailpulse/static/`：本地 CSS、JavaScript 和图标资源，不依赖外部 CDN。
 - `tests/`：单元测试、集成测试和网页测试；测试不得依赖真实公司邮箱或真实 AI 服务。
 - `docs/`：架构、配置、部署和运维说明；不存放运行日志或临时调试文件。
-- `migrations/`：数据库迁移文件，是数据库结构变更的 source of truth。
 - `var/`：运行时数据库、日志、缓存、附件和 MarkItDown 转换结果；属于 output/cache，不提交版本库。
 - `scripts/`：可复用的开发、测试和运维辅助脚本；不得存放一次性个人实验代码。
 
@@ -30,10 +29,11 @@ MailPulse 是一个供公司内网使用的多用户邮件归纳整理工具。�
 
 ## Source of truth、缓存与生成物
 
-- Python 领域逻辑、Pydantic schema、数据库模型和迁移是行为与数据结构的 source of truth。
+- Python 领域逻辑、Pydantic schema 和数据库模型（SQLAlchemy）是行为与数据结构的 source of truth。
+- 当前开发阶段不维护数据库迁移文件：应用启动和 `init-db` 按模型直接创建缺失的表结构；修改模型后使用 `reset-db` 重置本地数据库，不直接手工修改运行数据库作为结构变更。进入需要保留数据的阶段后再引入版本化迁移。
 - `var/` 中的 SQLite、索引、附件、转换后的 Markdown、缓存和日志均为运行输出，删除后必须可以重新生成。
 - 测试 fixture 可以提交，但必须是明确的脱敏或合成数据，并放在 `tests/fixtures/`。
-- 修改数据库结构时必须同步迁移和测试；不直接手工修改运行数据库作为结构变更。
+- 修改数据库结构时必须同步测试。
 
 ## 验证命令
 

@@ -36,7 +36,12 @@ class LoginRateLimiter:
 
 
 _LOGIN_RATE_LIMITER = LoginRateLimiter()
+_REGISTER_RATE_LIMITER = LoginRateLimiter(max_failures=5, window_seconds=600.0)
 
 
 def get_login_rate_limiter() -> LoginRateLimiter:
     return _LOGIN_RATE_LIMITER
+
+
+def get_register_rate_limiter() -> LoginRateLimiter:
+    return _REGISTER_RATE_LIMITER

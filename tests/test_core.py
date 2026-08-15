@@ -111,11 +111,13 @@ def test_parse_json_text_accepts_singleton_object_array_from_compatible_server()
     assert parse_json_text('[{"summary":"ok"},{"extra":true}]') is None
 
 
-def test_database_initialization_is_alembic_compatible(tmp_path):
+def test_database_initialization_creates_schema_without_migrations(tmp_path):
     settings = make_settings(tmp_path)
     init_database(settings)
     engine = __import__("mailpulse.db", fromlist=["build_engine"]).build_engine(settings)
-    assert "alembic_version" in inspect(engine).get_table_names()
+    table_names = set(inspect(engine).get_table_names())
+    assert {"users", "mailboxes", "reports", "audit_logs"}.issubset(table_names)
+    assert "alembic_version" not in table_names
     assert engine.connect().exec_driver_sql("select count(*) from users").scalar_one() == 0
 
 
@@ -123,6 +125,7 @@ def test_bootstrap_creates_default_admin_once(tmp_path):
     settings = make_settings(tmp_path)
     first = bootstrap_database(settings)
     assert first is not None
+    assert first.username == "admin"
     assert first.email == "admin@mailpulse.local"
     assert first.password == "admin123"
 
@@ -132,7 +135,7 @@ def test_bootstrap_creates_default_admin_once(tmp_path):
         assert admin.email == first.email
         assert admin.role == "admin"
         assert admin.must_change_password is True
-        assert authenticate(db, first.email, first.password) is admin
+        assert authenticate(db, first.username, first.password) is admin
     finally:
         db.close()
 
@@ -151,6 +154,37 @@ def test_reset_database_recreates_default_admin(tmp_path):
     recreated = bootstrap_database(settings)
     assert recreated is not None
     assert recreated.email == "admin@mailpulse.local"
+
+
+def test_create_user_email_is_optional_and_username_has_rules(tmp_path):
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        no_email = create_user(db, "root", "password-123", display_name="运维管理员")
+        assert no_email.username == "root"
+        assert no_email.email is None
+        assert authenticate(db, "ROOT", "password-123") is no_email
+        with pytest.raises(ValueError):
+            create_user(db, "root", "password-123")
+        with pytest.raises(ValueError):
+            create_user(db, "bad name", "password-123")
+        with pytest.raises(ValueError):
+            create_user(db, "中文名", "password-123")
+        with pytest.raises(ValueError):
+            create_user(db, "ab", "password-123")
+        with pytest.raises(ValueError):
+            create_user(db, "a" * 33, "password-123")
+        with pytest.raises(ValueError):
+            create_user(db, "valid-user", "password-123", email="not-an-email")
+        # 邮箱非唯一：多个账号可以共用同一邮箱
+        shared = create_user(db, "second", "password-123", email="shared@example.com")
+        assert shared.email == "shared@example.com"
+        assert create_user(db, "third", "password-123", email="shared@example.com").email == (
+            "shared@example.com"
+        )
+    finally:
+        db.close()
 
 
 def test_production_settings_require_explicit_secrets(tmp_path):
@@ -221,7 +255,7 @@ def test_uidvalidity_change_does_not_duplicate_canonical_message(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "user@example.com", "password-123")
+        user = create_user(db, "user", "password-123", email="user@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -265,7 +299,7 @@ def test_sync_deduplicates_identical_messages_in_one_batch(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "batch-dedup@example.com", "password-123")
+        user = create_user(db, "batch-dedup", "password-123", email="batch-dedup@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -343,7 +377,7 @@ def test_search_count_applies_status_filter_with_fts(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "search-status@example.com", "password-123")
+        user = create_user(db, "search-status", "password-123", email="search-status@example.com")
         messages = [
             CanonicalMessage(
                 owner_user_id=user.id,
@@ -391,7 +425,7 @@ def test_attachment_limits_quota_count_and_safe_filename(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "quota@example.com", "password-123")
+        user = create_user(db, "quota", "password-123", email="quota@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -460,7 +494,7 @@ def test_search_falls_back_when_fts_query_is_invalid(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "search@example.com", "password-123")
+        user = create_user(db, "search", "password-123", email="search@example.com")
         message = __import__("mailpulse.models", fromlist=["CanonicalMessage"]).CanonicalMessage(
             owner_user_id=user.id,
             content_hash="search-hash",
@@ -485,7 +519,9 @@ def test_message_sync_survives_unavailable_fts_index(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "search-fallback@example.com", "password-123")
+        user = create_user(
+            db, "search-fallback", "password-123", email="search-fallback@example.com"
+        )
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -578,7 +614,7 @@ def test_markitdown_converts_attachment_to_markdown(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "attachment@example.com", "password-123")
+        user = create_user(db, "attachment", "password-123", email="attachment@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -616,7 +652,7 @@ def test_demo_sync_to_report_records_markdown_status_and_audit(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "report@example.com", "password-123")
+        user = create_user(db, "report", "password-123", email="report@example.com")
         seed_demo(db, user, settings.data_dir)
         report = ReportService(db, settings).generate_for_user(user, use_demo_provider=True)
         db.commit()
@@ -830,7 +866,7 @@ def test_model_profile_global_binding_is_resolved(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "profile@example.com", "password-123")
+        user = create_user(db, "profile", "password-123", email="profile@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -883,7 +919,7 @@ def test_worker_persists_safe_failure_state(tmp_path, monkeypatch):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "worker@example.com", "password-123")
+        user = create_user(db, "worker", "password-123", email="worker@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -939,7 +975,7 @@ def test_report_delivery_records_failure_and_retry(tmp_path):
     init_database(settings)
     db = build_session_factory(settings)()
     try:
-        user = create_user(db, "delivery@example.com", "password-123")
+        user = create_user(db, "delivery", "password-123", email="delivery@example.com")
         mailbox = Mailbox(
             user_id=user.id,
             email_address=user.email,
@@ -988,8 +1024,8 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     app = create_app()
     settings = get_settings()
     db = build_session_factory(settings)()
-    admin = create_user(db, "admin@example.com", "password-123", role="admin")
-    user = create_user(db, "web@example.com", "password-123")
+    admin = create_user(db, "sysadmin", "password-123", role="admin", email="admin@example.com")
+    user = create_user(db, "web", "password-123", email="web@example.com")
     db.commit()
     db.close()
     admin_client = TestClient(app)
@@ -997,7 +1033,7 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
     response = admin_client.post(
         "/login",
-        data={"email": admin.email, "password": "password-123", "csrf_token": token},
+        data={"username": admin.username, "password": "password-123", "csrf_token": token},
     )
     assert response.status_code == 200
     assert "系统概览" in response.text
@@ -1021,8 +1057,9 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     created_user_response = admin_client.post(
         "/admin/users",
         data={
-            "email": "managed@example.com",
+            "username": "managed",
             "display_name": "受管用户",
+            "email": "managed@example.com",
             "password": "Managed-pass-123",
             "role": "user",
             "csrf_token": admin_token,
@@ -1068,7 +1105,7 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     user_token = re.search(r'name="csrf_token" value="([^"]+)"', user_login.text).group(1)
     user_response = user_client.post(
         "/login",
-        data={"email": user.email, "password": "password-123", "csrf_token": user_token},
+        data={"username": user.username, "password": "password-123", "csrf_token": user_token},
     )
     assert user_response.status_code == 200
     assert "快速开始" in user_response.text
@@ -1143,7 +1180,7 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         assert saved_schedule.cron_expression == "30 9 * * mon-fri"
         assert saved_schedule.is_enabled is True
         report_id = verify_db.query(Report).one().id
-        other_user = create_user(verify_db, "other@example.com", "password-123")
+        other_user = create_user(verify_db, "other", "password-123", email="other@example.com")
         verify_db.commit()
     finally:
         verify_db.close()
@@ -1153,13 +1190,152 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     other_client.post(
         "/login",
         data={
-            "email": other_user.email,
+            "username": other_user.username,
             "password": "password-123",
             "csrf_token": other_token,
         },
     )
     assert other_client.get(f"/reports/{report_id}").status_code == 404
     assert other_client.get("/admin").status_code == 403
+
+
+def test_self_registration_creates_regular_user_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "register-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    client = TestClient(create_app())
+    register_page = client.get("/register")
+    assert "注册 MailPulse 账号" in register_page.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', register_page.text).group(1)
+    response = client.post(
+        "/register",
+        data={
+            "username": "newbie",
+            "display_name": "新用户",
+            "email": "newbie@example.com",
+            "password": "password-123",
+            "confirm_password": "password-123",
+            "role": "admin",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?registered=1"
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        created = db.query(User).filter(User.username == "newbie").one()
+        assert created.role == "user"
+        assert created.display_name == "新用户"
+        assert created.email == "newbie@example.com"
+        assert authenticate(db, created.username, "password-123") is created
+        audit = db.query(AuditLog).filter(AuditLog.action == "user_register").one()
+        assert audit.target_id == str(created.id)
+        assert audit.metadata_json == {"role": "user"}
+    finally:
+        db.close()
+    login_page = client.get("/login?registered=1")
+    assert "注册成功，请使用新账号登录" in login_page.text
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    logged_in = client.post(
+        "/login",
+        data={
+            "username": "newbie",
+            "password": "password-123",
+            "csrf_token": login_token,
+        },
+        follow_redirects=False,
+    )
+    assert logged_in.status_code == 303
+    assert logged_in.headers["location"] == "/"
+    assert client.get("/register", follow_redirects=False).headers["location"] == "/"
+
+
+def test_self_registration_rejects_invalid_submissions(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "register-reject-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    client = TestClient(create_app())
+    page = client.get("/register")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+
+    mismatch = client.post(
+        "/register",
+        data={
+            "username": "newbie",
+            "password": "password-123",
+            "confirm_password": "password-456",
+            "csrf_token": token,
+        },
+    )
+    assert "两次输入的密码不一致" in mismatch.text
+
+    short = client.post(
+        "/register",
+        data={
+            "username": "newbie",
+            "password": "short",
+            "confirm_password": "short",
+            "csrf_token": token,
+        },
+    )
+    assert "密码长度至少为 8 个字符" in short.text
+
+    bad_username = client.post(
+        "/register",
+        data={
+            "username": "ab",
+            "password": "password-123",
+            "confirm_password": "password-123",
+            "csrf_token": token,
+        },
+    )
+    assert "用户名仅支持 3-32 位字母、数字、下划线、连字符或点" in bad_username.text
+
+    bad_email = client.post(
+        "/register",
+        data={
+            "username": "newbie2",
+            "email": "not-an-email",
+            "password": "password-123",
+            "confirm_password": "password-123",
+            "csrf_token": token,
+        },
+    )
+    assert "请输入有效的邮箱格式" in bad_email.text
+
+    created = client.post(
+        "/register",
+        data={
+            "username": "newbie",
+            "password": "password-123",
+            "confirm_password": "password-123",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    duplicate = client.post(
+        "/register",
+        data={
+            "username": "NEWBIE",
+            "password": "password-123",
+            "confirm_password": "password-123",
+            "csrf_token": token,
+        },
+    )
+    assert "用户名已存在" in duplicate.text
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        assert db.query(User).filter(User.username == "newbie").count() == 1
+    finally:
+        db.close()
 
 
 def test_default_admin_can_skip_initial_password_change(tmp_path, monkeypatch):
@@ -1174,7 +1350,7 @@ def test_default_admin_can_skip_initial_password_change(tmp_path, monkeypatch):
     response = client.post(
         "/login",
         data={
-            "email": "admin@mailpulse.local",
+            "username": "admin",
             "password": "admin123",
             "csrf_token": login_token,
         },
@@ -1201,7 +1377,7 @@ def test_default_admin_can_skip_initial_password_change(tmp_path, monkeypatch):
     logged_in_again = client.post(
         "/login",
         data={
-            "email": "admin@mailpulse.local",
+            "username": "admin",
             "password": "admin123",
             "csrf_token": login_token,
         },
@@ -1222,7 +1398,7 @@ def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
     response = client.post(
         "/login",
         data={
-            "email": "admin@mailpulse.local",
+            "username": "admin",
             "password": "admin123",
             "csrf_token": login_token,
         },
@@ -1248,7 +1424,7 @@ def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
     old_password = client.post(
         "/login",
         data={
-            "email": "admin@mailpulse.local",
+            "username": "admin",
             "password": "admin123",
             "csrf_token": login_token,
         },
@@ -1261,7 +1437,7 @@ def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
     new_password = client.post(
         "/login",
         data={
-            "email": "admin@mailpulse.local",
+            "username": "admin",
             "password": "admin456",
             "csrf_token": login_token,
         },
@@ -1295,6 +1471,13 @@ def test_login_remember_me_controls_cookie_persistence(tmp_path, monkeypatch):
     get_settings.cache_clear()
     from mailpulse.app import create_app
 
+    def session_cookie(response):
+        return next(
+            item
+            for item in response.headers.get_list("set-cookie")
+            if item.startswith("mailpulse_session=")
+        )
+
     try:
         client = TestClient(create_app())
         login_page = client.get("/login")
@@ -1303,13 +1486,13 @@ def test_login_remember_me_controls_cookie_persistence(tmp_path, monkeypatch):
         normal = client.post(
             "/login",
             data={
-                "email": "admin@mailpulse.local",
+                "username": "admin",
                 "password": "admin123",
                 "csrf_token": login_token,
             },
             follow_redirects=False,
         )
-        normal_cookie = normal.headers["set-cookie"]
+        normal_cookie = session_cookie(normal)
         assert "Max-Age=" not in normal_cookie
         assert "admin123" not in normal_cookie
 
@@ -1319,16 +1502,100 @@ def test_login_remember_me_controls_cookie_persistence(tmp_path, monkeypatch):
         remembered = remembered_client.post(
             "/login",
             data={
-                "email": "admin@mailpulse.local",
+                "username": "admin",
                 "password": "admin123",
                 "remember_me": "true",
                 "csrf_token": login_token,
             },
             follow_redirects=False,
         )
-        remembered_cookie = remembered.headers["set-cookie"]
+        remembered_cookie = session_cookie(remembered)
     finally:
         get_settings.cache_clear()
 
     assert "Max-Age=2592000" in remembered_cookie
     assert "admin123" not in remembered_cookie
+
+
+def test_login_remember_password_prefills_and_clears_cookie(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "remember-password-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    client = TestClient(create_app())
+    login_page = client.get("/login")
+    assert "记住登录状态" in login_page.text
+    assert "记住密码" in login_page.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    response = client.post(
+        "/login",
+        data={
+            "username": "admin",
+            "password": "admin123",
+            "remember_password": "true",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    remember_cookie = next(
+        item
+        for item in response.headers.get_list("set-cookie")
+        if item.startswith("mailpulse_remember_credentials=")
+    )
+    assert "HttpOnly" in remember_cookie
+    assert "Max-Age=2592000" in remember_cookie
+    assert "admin123" not in remember_cookie
+    saved_value = response.cookies["mailpulse_remember_credentials"]
+
+    saved_client = TestClient(create_app())
+    saved_client.cookies.set("mailpulse_remember_credentials", saved_value)
+    saved_page = saved_client.get("/login")
+    assert 'name="username" value="admin"' in saved_page.text
+    assert 'name="password" value="admin123"' in saved_page.text
+    assert 'name="remember_password" value="true" checked' in saved_page.text
+    saved_token = re.search(r'name="csrf_token" value="([^"]+)"', saved_page.text).group(1)
+
+    # 登录失败不会更新记住密码 Cookie，也不会回显明文密码
+    failed = saved_client.post(
+        "/login",
+        data={
+            "username": "admin",
+            "password": "wrong-password",
+            "remember_password": "true",
+            "csrf_token": saved_token,
+        },
+    )
+    assert "账号或密码错误" in failed.text
+    assert not any(
+        item.startswith("mailpulse_remember_credentials=")
+        for item in failed.headers.get_list("set-cookie")
+    )
+    assert 'name="password" value="wrong-password"' not in failed.text
+
+    # 取消勾选“记住密码”登录时清除已保存的凭据 Cookie
+    cleared = saved_client.post(
+        "/login",
+        data={
+            "username": "admin",
+            "password": "admin123",
+            "csrf_token": saved_token,
+        },
+        follow_redirects=False,
+    )
+    assert cleared.status_code == 303
+    cleared_cookie = next(
+        item
+        for item in cleared.headers.get_list("set-cookie")
+        if item.startswith("mailpulse_remember_credentials=")
+    )
+    assert "Max-Age=0" in cleared_cookie
+
+    # 伪造或损坏的 Cookie 不会导致登录页报错
+    tampered = TestClient(create_app())
+    tampered.cookies.set("mailpulse_remember_credentials", "not-a-valid-token")
+    tampered_page = tampered.get("/login")
+    assert tampered_page.status_code == 200
+    assert "登录 MailPulse" in tampered_page.text
+    assert 'name="password" value="not-a-valid-token"' not in tampered_page.text

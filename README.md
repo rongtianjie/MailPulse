@@ -41,10 +41,10 @@ uv run pytest
 cp .env.example .env
 ```
 
-首次启动服务时会自动执行数据库迁移，并在数据库中没有管理员账号时创建默认管理员：
+首次启动服务时会自动创建数据库表结构，并在数据库中没有管理员账号时创建默认管理员：
 
 ```text
-登录邮箱：admin@mailpulse.local
+登录用户名：admin
 登录密码：admin123
 ```
 
@@ -66,16 +66,19 @@ uv run mailpulse serve
 uv run mailpulse init-db
 ```
 
-打开启动日志中显示的地址（默认 [http://127.0.0.1:8080](http://127.0.0.1:8080)）登录。`init-db` 和应用启动都会自动执行数据库迁移，也可以手动执行：
+打开启动日志中显示的地址（默认 [http://127.0.0.1:8080](http://127.0.0.1:8080)）登录。`init-db` 和应用启动都会自动创建数据库表结构。
+
+开发阶段修改了数据库模型后，使用 `reset-db` 重置本地数据库（会删除全部本地数据）：
 
 ```bash
-uv run alembic upgrade head
+uv run mailpulse reset-db --confirm
 ```
 
 `init` 命令仍用于显式创建一个自定义管理员账号：
 
 ```bash
 uv run mailpulse init \
+  --admin-username admin \
   --admin-email admin@example.com \
   --admin-password 'change-this-password'
 ```
@@ -99,10 +102,17 @@ uv run mailpulse reset-db --confirm
 - `MAILPULSE_LOG_LEVEL`：控制台和文件日志级别，默认 `INFO`。
 - `MAILPULSE_LOG_ROTATION` / `MAILPULSE_LOG_RETENTION`：日志轮转时间和保留时间，默认每天零点轮转。
 - `MAILPULSE_REMEMBER_ME_DAYS`：勾选记住登录状态时的会话有效期，默认 30 天。
+- `MAILPULSE_SESSION_HTTPS_ONLY`：是否仅通过 HTTPS 发送 Session Cookie；生产 HTTPS 部署应设为 `true`。
+- `MAILPULSE_EXTERNAL_AI_ALLOWED`：是否允许访问本机以外的 AI 服务，默认 `false`。
+- `MAILPULSE_DATABASE_URL`：可选数据库 URL；未设置时使用 `var/mailpulse.sqlite3`。当前部署方案以文件型 SQLite 为准。
 
 生产环境应使用独立的随机密钥，并确保运行目录仅对应用账号可读写。密钥、邮箱密码和 AI API Key 不得提交到版本库。
 日志默认输出到控制台并写入 `var/logs/mailpulse.log`，按配置自动轮转和清理。默认管理员密码仅输出到控制台，不写入日志文件。
 登录页面的“记住登录状态”只延长签名 Session Cookie 的有效期，不保存密码。
+
+配置优先级分两类：`MAILPULSE_HOST` 和 `MAILPULSE_PORT` 遵循“命令行参数 > 环境变量 > `.env` > 代码默认值”；其他配置由 Pydantic Settings 按“环境变量 > `.env` > 代码默认值”解析。服务启动日志会分别显示 host 和 port 的实际来源。
+
+`.env.example` 还列出了 AI 超时、输入输出限制、附件大小/数量和本地存储配额等可选项。管理员在模型管理页面保存的模型配置可以按模型单独设置运行策略，并优先于环境变量中的模型回退配置。
 
 ## AI 模型配置
 
@@ -110,6 +120,8 @@ uv run mailpulse reset-db --confirm
 
 1. 配置一个同时支持文本和图片输入的 Primary 模型。
 2. 配置一个仅支持文本的 Primary 模型，再配置一个支持图片输入的 Vision 模型。
+
+如果没有在管理控制台绑定模型，也可以通过 `MAILPULSE_AI_BASE_URL`、`MAILPULSE_AI_MODEL` 等环境变量提供 Primary 回退配置；需要视觉副模型时，再配置对应的 `MAILPULSE_AI_VISION_*` 变量。默认策略只允许访问本机模型服务，访问其他地址前需要显式设置 `MAILPULSE_EXTERNAL_AI_ALLOWED=true`。
 
 附件处理流程如下：
 
@@ -149,7 +161,7 @@ uv run mailpulse worker
 - 本地标签、星标和已处理状态由 MailPulse 独立维护。
 - 用户查询均带账号范围，服务端不会仅依赖前端隐藏导航实现权限控制。
 - 邮件正文、HTML、附件和模型输出均按不可信输入处理。
-- 附件解析受文件类型、大小、数量、处理时间和资源数量限制。
+- 附件同步和转换受单文件大小、单封邮件附件数量、用户/全局存储配额、图片资源数量与大小等限制。
 - 运行数据默认写入 `var/`，该目录属于缓存和输出，不纳入版本控制。
 
 更详细的系统结构、运行方式和维护边界见：
@@ -163,8 +175,8 @@ uv run mailpulse worker
 演示数据命令仅用于本地开发和自动化测试，不属于正式网页功能：
 
 ```bash
-uv run mailpulse seed-demo --user-email user@example.com
-uv run mailpulse run-once --user-email user@example.com --demo-ai
+uv run mailpulse seed-demo --username user
+uv run mailpulse run-once --username user --demo-ai
 ```
 
 提交前执行：
@@ -172,7 +184,6 @@ uv run mailpulse run-once --user-email user@example.com --demo-ai
 ```bash
 uv run pytest
 uv run ruff check .
-uv run alembic check
 uv run python -m mailpulse --help
 ```
 
