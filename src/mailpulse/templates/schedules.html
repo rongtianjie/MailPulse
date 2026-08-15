@@ -5,21 +5,21 @@
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="grid-2">
   <div class="card">
-    <h2>新增任务</h2>
+    <div class="section-heading"><h2>{{ '编辑任务' if editing_schedule else '新增任务' }}</h2>{% if editing_schedule %}<a class="link-button" href="/schedules">取消编辑</a>{% endif %}</div>
     {% if mailboxes %}
-    <form method="post" action="/schedules" class="form-grid" data-disable-on-submit>
+    <form method="post" action="{{ '/schedules/' ~ editing_schedule.id ~ '/edit' if editing_schedule else '/schedules' }}" class="form-grid" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>任务名称<input name="name" value="每日邮件报告" required></label>
-      <label>邮箱<select name="mailbox_id" required>{% for mailbox in mailboxes %}<option value="{{ mailbox.id }}">{{ mailbox.name }}（{{ mailbox.email_address }}）</option>{% endfor %}</select></label>
-      <label>规则集<select name="rule_set_id"><option value="">全部邮件</option>{% for rule in rule_sets %}<option value="{{ rule.id }}">{{ rule.name }}</option>{% endfor %}</select></label>
-      <label>任务类型<select name="schedule_type"><option value="daily">每日</option><option value="weekly">每周</option><option value="custom">自定义 cron</option></select></label>
-      <label>执行时间<input type="time" name="scheduled_time" value="09:00"></label>
-      <label>每周范围<select name="weekdays"><option value="mon-fri">周一至周五</option><option value="mon-sun">每天</option><option value="sat,sun">周末</option><option value="mon,wed,fri">周一、三、五</option></select></label>
-      <label>自定义 cron<input name="custom_cron" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
-      <label>时区<input name="timezone" value="Asia/Shanghai" required></label>
-      <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="24" required></label>
-      <label class="check"><input type="checkbox" name="is_enabled" checked> 创建后启用</label>
-      <div class="form-actions"><button class="primary" type="submit">保存任务</button></div>
+      <label>任务名称<input name="name" value="{{ form.name }}" required></label>
+      <label>邮箱<select name="mailbox_id" required>{% for mailbox in mailboxes %}<option value="{{ mailbox.id }}" {% if form.mailbox_id|string == mailbox.id|string %}selected{% endif %}>{{ mailbox.name }}（{{ mailbox.email_address }}）</option>{% endfor %}</select></label>
+      <label>规则集<select name="rule_set_id"><option value="" {% if not form.rule_set_id %}selected{% endif %}>全部邮件</option>{% for rule in rule_sets %}<option value="{{ rule.id }}" {% if form.rule_set_id|string == rule.id|string %}selected{% endif %}>{{ rule.name }}</option>{% endfor %}</select></label>
+      <label>任务类型<select name="schedule_type"><option value="daily" {% if form.schedule_type == 'daily' %}selected{% endif %}>每日</option><option value="weekly" {% if form.schedule_type == 'weekly' %}selected{% endif %}>每周</option><option value="custom" {% if form.schedule_type == 'custom' %}selected{% endif %}>自定义 cron</option></select></label>
+      <label>执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
+      <label>每周范围<select name="weekdays"><option value="mon-fri" {% if form.weekdays == 'mon-fri' %}selected{% endif %}>周一至周五</option><option value="mon-sun" {% if form.weekdays == 'mon-sun' %}selected{% endif %}>每天</option><option value="sat,sun" {% if form.weekdays == 'sat,sun' %}selected{% endif %}>周末</option><option value="mon,wed,fri" {% if form.weekdays == 'mon,wed,fri' %}selected{% endif %}>周一、三、五</option></select></label>
+      <label>自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
+      <label>时区<input name="timezone" value="{{ form.timezone }}" required></label>
+      <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="{{ form.lookback_hours }}" required></label>
+      <label class="check"><input type="checkbox" name="is_enabled" {% if form.is_enabled %}checked{% endif %}> {{ '启用该任务' if editing_schedule else '创建后启用' }}</label>
+      <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">{{ '保存修改' if editing_schedule else '保存任务' }}</button></div>
     </form>
     {% else %}<p class="empty">请先在邮箱设置中配置邮箱。</p><a class="button" href="/settings">邮箱设置</a>{% endif %}
   </div>
@@ -40,7 +40,7 @@
     {% for schedule in schedules %}
     <div class="list-item">
       <span><strong>{{ schedule.name }}</strong><small>{{ schedule.cron_expression }} · {{ schedule.timezone }} · 回看 {{ schedule.lookback_hours }} 小时{% if schedule.last_run_at %} · 上次成功 {{ schedule.last_run_at | fmt_time }}{% endif %}</small></span>
-      <span class="actions"><span class="tag {{ 'success' if schedule.is_enabled else 'muted' }}">{{ '启用' if schedule.is_enabled else '停用' }}</span><form method="post" action="/schedules/{{ schedule.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if schedule.is_enabled else '启用' }}</button></form><form method="post" action="/schedules/{{ schedule.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span>
+      <span class="actions"><span class="tag {{ 'success' if schedule.is_enabled else 'muted' }}">{{ '启用' if schedule.is_enabled else '停用' }}</span><a class="link-button" href="/schedules/{{ schedule.id }}/edit">编辑</a><form method="post" action="/schedules/{{ schedule.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if schedule.is_enabled else '启用' }}</button></form><form method="post" action="/schedules/{{ schedule.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span>
     </div>
     {% endfor %}
   </div>

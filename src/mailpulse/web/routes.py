@@ -182,7 +182,14 @@ def schedules_page(
     return _render_schedule_page(request, user, db, error=None)
 
 
-def _render_schedule_page(request: Request, user: User, db: Session, error: str | None):
+def _render_schedule_page(
+    request: Request,
+    user: User,
+    db: Session,
+    error: str | None,
+    editing_schedule: Schedule | None = None,
+    submitted: dict | None = None,
+):
     mailboxes = list(db.scalars(select(Mailbox).where(Mailbox.user_id == user.id)))
     rule_sets = list(
         db.scalars(
@@ -196,6 +203,23 @@ def _render_schedule_page(request: Request, user: User, db: Session, error: str 
             select(Schedule).where(Schedule.user_id == user.id).order_by(Schedule.created_at.desc())
         )
     )
+    if submitted is not None:
+        form = submitted
+    elif editing_schedule is not None:
+        form = _schedule_to_form(editing_schedule)
+    else:
+        form = {
+            "name": "每日邮件报告",
+            "mailbox_id": "",
+            "rule_set_id": "",
+            "schedule_type": "daily",
+            "scheduled_time": "09:00",
+            "weekdays": "mon-fri",
+            "custom_cron": "",
+            "timezone": "Asia/Shanghai",
+            "lookback_hours": 24,
+            "is_enabled": True,
+        }
     return _render(
         request,
         "schedules.html",
@@ -204,7 +228,116 @@ def _render_schedule_page(request: Request, user: User, db: Session, error: str 
         rule_sets=rule_sets,
         schedules=schedules,
         error=error,
+        form=form,
+        editing_schedule=editing_schedule,
     )
+
+
+WEEKDAY_PRESETS = {"mon-fri", "mon-sun", "sat,sun", "mon,wed,fri"}
+
+
+def _schedule_to_form(schedule: Schedule) -> dict:
+    """Derive editable form fields from a stored schedule (lossy for custom cron)."""
+    form = {
+        "name": schedule.name,
+        "mailbox_id": schedule.mailbox_id,
+        "rule_set_id": schedule.rule_set_id or "",
+        "timezone": schedule.timezone,
+        "lookback_hours": schedule.lookback_hours,
+        "is_enabled": schedule.is_enabled,
+        "schedule_type": "custom",
+        "scheduled_time": "09:00",
+        "weekdays": "mon-fri",
+        "custom_cron": schedule.cron_expression,
+    }
+    parts = schedule.cron_expression.split()
+    if len(parts) == 5 and parts[2] == "*" and parts[3] == "*":
+        minute, hour, _, _, day_of_week = parts
+        try:
+            hour_int, minute_int = int(hour), int(minute)
+            if 0 <= hour_int <= 23 and 0 <= minute_int <= 59:
+                form["scheduled_time"] = f"{hour_int:02d}:{minute_int:02d}"
+                if day_of_week == "*":
+                    form["schedule_type"] = "daily"
+                    form["custom_cron"] = ""
+                elif day_of_week in WEEKDAY_PRESETS:
+                    form["schedule_type"] = "weekly"
+                    form["weekdays"] = day_of_week
+                    form["custom_cron"] = ""
+        except ValueError:
+            pass
+    return form
+
+
+def _submitted_schedule_form(
+    name: str,
+    mailbox_id: int,
+    rule_set_id: int | None,
+    schedule_type: str,
+    scheduled_time: str,
+    weekdays: str,
+    custom_cron: str,
+    timezone: str,
+    lookback_hours: int,
+    is_enabled: bool,
+) -> dict:
+    return {
+        "name": name,
+        "mailbox_id": mailbox_id,
+        "rule_set_id": rule_set_id or "",
+        "schedule_type": schedule_type,
+        "scheduled_time": scheduled_time,
+        "weekdays": weekdays,
+        "custom_cron": custom_cron,
+        "timezone": timezone,
+        "lookback_hours": lookback_hours,
+        "is_enabled": is_enabled,
+    }
+
+
+def _collect_schedule_form(
+    name: str,
+    mailbox_id: int,
+    rule_set_id: int | None,
+    schedule_type: str,
+    scheduled_time: str,
+    weekdays: str,
+    custom_cron: str,
+    timezone: str,
+    lookback_hours: int,
+    is_enabled: bool,
+    user: User,
+    db: Session,
+) -> dict:
+    """Validate schedule form inputs; raises ValueError with a user-facing reason."""
+    if schedule_type not in {"daily", "weekly", "custom"}:
+        raise ValueError("任务类型无效")
+    if not 1 <= lookback_hours <= 24 * 31:
+        raise ValueError("回看时间必须在 1 到 744 小时之间")
+    mailbox = db.scalar(
+        select(Mailbox).where(Mailbox.id == mailbox_id, Mailbox.user_id == user.id)
+    )
+    if mailbox is None:
+        raise ValueError("邮箱不存在或不属于当前用户")
+    selected_rule_id = None
+    if rule_set_id is not None:
+        rule_set = db.scalar(
+            select(RuleSet).where(RuleSet.id == rule_set_id, RuleSet.user_id == user.id)
+        )
+        if rule_set is None:
+            raise ValueError("规则集不存在或不属于当前用户")
+        selected_rule_id = rule_set.id
+    cron_expression = build_cron_expression(schedule_type, scheduled_time, weekdays, custom_cron)
+    validate_schedule(cron_expression, timezone.strip())
+    return {
+        "name": name.strip() or "邮件报告任务",
+        "mailbox_id": mailbox.id,
+        "rule_set_id": selected_rule_id,
+        "cron_expression": cron_expression,
+        "timezone": timezone.strip(),
+        "lookback_hours": lookback_hours,
+        "is_enabled": is_enabled,
+    }
 
 
 @router.post("/schedules", response_class=HTMLResponse)
@@ -226,44 +359,87 @@ def create_schedule(
 ):
     validate_csrf(request, csrf_token)
     try:
-        if schedule_type not in {"daily", "weekly", "custom"}:
-            raise ValueError("任务类型无效")
-        if not 1 <= lookback_hours <= 24 * 31:
-            raise ValueError("回看时间必须在 1 到 744 小时之间")
-        mailbox = db.scalar(
-            select(Mailbox).where(Mailbox.id == mailbox_id, Mailbox.user_id == user.id)
+        values = _collect_schedule_form(
+            name, mailbox_id, rule_set_id, schedule_type, scheduled_time,
+            weekdays, custom_cron, timezone, lookback_hours, is_enabled, user, db,
         )
-        if mailbox is None:
-            raise ValueError("邮箱不存在或不属于当前用户")
-        selected_rule_id = None
-        if rule_set_id is not None:
-            rule_set = db.scalar(
-                select(RuleSet).where(RuleSet.id == rule_set_id, RuleSet.user_id == user.id)
-            )
-            if rule_set is None:
-                raise ValueError("规则集不存在或不属于当前用户")
-            selected_rule_id = rule_set.id
-        cron_expression = build_cron_expression(
-            schedule_type, scheduled_time, weekdays, custom_cron
-        )
-        validate_schedule(cron_expression, timezone.strip())
-        db.add(
-            Schedule(
-                user_id=user.id,
-                mailbox_id=mailbox.id,
-                rule_set_id=selected_rule_id,
-                name=name.strip() or "邮件报告任务",
-                cron_expression=cron_expression,
-                timezone=timezone.strip(),
-                lookback_hours=lookback_hours,
-                is_enabled=is_enabled,
-            )
-        )
+        db.add(Schedule(user_id=user.id, **values))
         db.commit()
         return RedirectResponse("/schedules", status_code=303)
     except ValueError as exc:
         db.rollback()
-        return _render_schedule_page(request, user, db, error=f"任务配置无效：{exc}")
+        submitted = _submitted_schedule_form(
+            name, mailbox_id, rule_set_id, schedule_type, scheduled_time,
+            weekdays, custom_cron, timezone, lookback_hours, is_enabled,
+        )
+        return _render_schedule_page(
+            request, user, db, error=f"任务配置无效：{exc}", submitted=submitted
+        )
+
+
+@router.get("/schedules/{schedule_id}/edit", response_class=HTMLResponse)
+def edit_schedule_page(
+    request: Request,
+    schedule_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    schedule = db.scalar(
+        select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user.id)
+    )
+    if schedule is None:
+        return HTMLResponse("任务不存在", status_code=404)
+    return _render_schedule_page(request, user, db, error=None, editing_schedule=schedule)
+
+
+@router.post("/schedules/{schedule_id}/edit")
+def update_schedule(
+    request: Request,
+    schedule_id: int,
+    name: str = Form(...),
+    mailbox_id: int = Form(...),
+    rule_set_id: int | None = Form(None),
+    schedule_type: str = Form("daily"),
+    scheduled_time: str = Form("09:00"),
+    weekdays: str = Form("mon-fri"),
+    custom_cron: str = Form(""),
+    timezone: str = Form("Asia/Shanghai"),
+    lookback_hours: int = Form(24),
+    is_enabled: bool = Form(False),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    schedule = db.scalar(
+        select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user.id)
+    )
+    if schedule is None:
+        return HTMLResponse("任务不存在", status_code=404)
+    try:
+        values = _collect_schedule_form(
+            name, mailbox_id, rule_set_id, schedule_type, scheduled_time,
+            weekdays, custom_cron, timezone, lookback_hours, is_enabled, user, db,
+        )
+        schedule.name = values["name"]
+        schedule.mailbox_id = values["mailbox_id"]
+        schedule.rule_set_id = values["rule_set_id"]
+        schedule.cron_expression = values["cron_expression"]
+        schedule.timezone = values["timezone"]
+        schedule.lookback_hours = values["lookback_hours"]
+        schedule.is_enabled = values["is_enabled"]
+        db.commit()
+        return RedirectResponse("/schedules", status_code=303)
+    except ValueError as exc:
+        db.rollback()
+        submitted = _submitted_schedule_form(
+            name, mailbox_id, rule_set_id, schedule_type, scheduled_time,
+            weekdays, custom_cron, timezone, lookback_hours, is_enabled,
+        )
+        return _render_schedule_page(
+            request, user, db, error=f"任务配置无效：{exc}",
+            editing_schedule=schedule, submitted=submitted,
+        )
 
 
 @router.post("/schedules/{schedule_id}/toggle")
@@ -902,12 +1078,21 @@ def admin_page(request: Request, user: User = Depends(admin_user), db: Session =
     return _render_admin_page(request, user, db, error=None)
 
 
-def _render_admin_page(request: Request, user: User, db: Session, error: str | None):
+def _render_admin_page(
+    request: Request,
+    user: User,
+    db: Session,
+    error: str | None,
+    editing_profile: AIProviderProfile | None = None,
+    model_form: dict | None = None,
+):
     users = list(db.scalars(select(User).order_by(User.created_at.desc())))
     jobs = list(db.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(20)))
     profiles = list(
         db.scalars(select(AIProviderProfile).order_by(AIProviderProfile.created_at.desc()))
     )
+    if model_form is None:
+        model_form = _model_form_defaults(editing_profile, db)
     return _render(
         request,
         "admin.html",
@@ -916,6 +1101,98 @@ def _render_admin_page(request: Request, user: User, db: Session, error: str | N
         jobs=jobs,
         profiles=profiles,
         error=error,
+        editing_profile=editing_profile,
+        model_form=model_form,
+    )
+
+
+def _validate_model_form(
+    role: str,
+    timeout_seconds: float,
+    max_retries: int,
+    max_input_chars: int,
+    max_output_tokens: int,
+    max_images: int,
+    max_image_size_mb: int,
+) -> str | None:
+    if role not in {"primary", "vision"}:
+        return "模型角色必须是 primary 或 vision"
+    if not 1 <= timeout_seconds <= 600:
+        return "模型超时时间必须在 1 到 600 秒之间"
+    if not 0 <= max_retries <= 5:
+        return "模型重试次数必须在 0 到 5 次之间"
+    if not 4_096 <= max_input_chars <= 2_000_000:
+        return "模型输入上限必须在 4096 到 2000000 字符之间"
+    if not 128 <= max_output_tokens <= 32_000:
+        return "模型输出上限必须在 128 到 32000 token 之间"
+    if not 1 <= max_images <= 100:
+        return "模型图片数量上限必须在 1 到 100 张之间"
+    if not 1 <= max_image_size_mb <= 100:
+        return "单图片大小上限必须在 1 到 100 MB 之间"
+    return None
+
+
+def _model_form_values(
+    name: str,
+    role: str,
+    base_url: str,
+    model_name: str,
+    image_input: bool,
+    structured_output: bool,
+    timeout_seconds: float,
+    max_retries: int,
+    max_input_chars: int,
+    max_output_tokens: int,
+    max_images: int,
+    max_image_size_mb: int,
+) -> dict:
+    return {
+        "name": name,
+        "role": role,
+        "base_url": base_url,
+        "model_name": model_name,
+        "api_key": "",
+        "image_input": image_input,
+        "structured_output": structured_output,
+        "timeout_seconds": timeout_seconds,
+        "max_retries": max_retries,
+        "max_input_chars": max_input_chars,
+        "max_output_tokens": max_output_tokens,
+        "max_images": max_images,
+        "max_image_size_mb": max_image_size_mb,
+    }
+
+
+def _model_form_defaults(profile: AIProviderProfile | None, db: Session | None = None) -> dict:
+    if profile is None:
+        return _model_form_values(
+            "", "primary", "", "", False, True, 90.0, 2, 120_000, 1800, 20, 10
+        )
+    capabilities = profile.capabilities or {}
+    policy = profile.policy or {}
+    role = "primary"
+    if db is not None:
+        binding = db.scalars(
+            select(ModelBinding)
+            .where(ModelBinding.provider_profile_id == profile.id)
+            .limit(1)
+        ).first()
+        if binding is not None:
+            role = binding.role
+    max_image_bytes = policy.get("max_image_bytes", 10 * 1024 * 1024)
+    return _model_form_values(
+        profile.name,
+        role,
+        profile.base_url,
+        profile.model_name or "",
+        bool(capabilities.get("image_input", False)),
+        bool(capabilities.get("structured_output", True)),
+        policy.get("timeout_seconds", 90.0),
+        policy.get("max_retries", 2),
+        policy.get("max_input_chars", 120_000),
+        policy.get("max_output_tokens", 1800),
+        policy.get("max_images", 20),
+        max_image_bytes // (1024 * 1024),
     )
 
 
@@ -972,23 +1249,17 @@ def create_model_profile(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
-    validation_error = None
-    if role not in {"primary", "vision"}:
-        validation_error = "模型角色必须是 primary 或 vision"
-    elif not 1 <= timeout_seconds <= 600:
-        validation_error = "模型超时时间必须在 1 到 600 秒之间"
-    elif not 0 <= max_retries <= 5:
-        validation_error = "模型重试次数必须在 0 到 5 次之间"
-    elif not 4_096 <= max_input_chars <= 2_000_000:
-        validation_error = "模型输入上限必须在 4096 到 2000000 字符之间"
-    elif not 128 <= max_output_tokens <= 32_000:
-        validation_error = "模型输出上限必须在 128 到 32000 token 之间"
-    elif not 1 <= max_images <= 100:
-        validation_error = "模型图片数量上限必须在 1 到 100 张之间"
-    elif not 1 <= max_image_size_mb <= 100:
-        validation_error = "单图片大小上限必须在 1 到 100 MB 之间"
+    validation_error = _validate_model_form(
+        role, timeout_seconds, max_retries, max_input_chars, max_output_tokens,
+        max_images, max_image_size_mb,
+    )
     if validation_error:
-        return _render_admin_page(request, user, db, error=validation_error)
+        model_form = _model_form_values(
+            name, role, base_url, model_name, image_input, structured_output,
+            timeout_seconds, max_retries, max_input_chars, max_output_tokens,
+            max_images, max_image_size_mb,
+        )
+        return _render_admin_page(request, user, db, error=validation_error, model_form=model_form)
     profile = AIProviderProfile(
         owner_user_id=None,
         name=name.strip(),
@@ -1013,6 +1284,90 @@ def create_model_profile(
     db.add(profile)
     db.flush()
     db.add(ModelBinding(role=role, provider_profile_id=profile.id))
+    db.commit()
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.get("/admin/models/{profile_id}/edit", response_class=HTMLResponse)
+def edit_model_profile_page(
+    request: Request,
+    profile_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    profile = db.get(AIProviderProfile, profile_id)
+    if profile is None:
+        return HTMLResponse("模型配置不存在", status_code=404)
+    return _render_admin_page(request, user, db, error=None, editing_profile=profile)
+
+
+@router.post("/admin/models/{profile_id}/edit")
+def update_model_profile(
+    request: Request,
+    profile_id: int,
+    name: str = Form(...),
+    role: str = Form("primary"),
+    base_url: str = Form(...),
+    model_name: str = Form(""),
+    api_key: str = Form(""),
+    image_input: bool = Form(False),
+    structured_output: bool = Form(True),
+    timeout_seconds: float = Form(90.0),
+    max_retries: int = Form(2),
+    max_input_chars: int = Form(120_000),
+    max_output_tokens: int = Form(1_800),
+    max_images: int = Form(20),
+    max_image_size_mb: int = Form(10),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    profile = db.get(AIProviderProfile, profile_id)
+    if profile is None:
+        return HTMLResponse("模型配置不存在", status_code=404)
+    validation_error = _validate_model_form(
+        role, timeout_seconds, max_retries, max_input_chars, max_output_tokens,
+        max_images, max_image_size_mb,
+    )
+    if validation_error:
+        model_form = _model_form_values(
+            name, role, base_url, model_name, image_input, structured_output,
+            timeout_seconds, max_retries, max_input_chars, max_output_tokens,
+            max_images, max_image_size_mb,
+        )
+        return _render_admin_page(
+            request, user, db, error=validation_error,
+            editing_profile=profile, model_form=model_form,
+        )
+    profile.name = name.strip()
+    profile.base_url = base_url.strip().rstrip("/")
+    profile.model_name = model_name.strip()
+    if api_key:
+        profile.api_key_encrypted = encrypt_secret(api_key)
+    profile.capabilities = {
+        "text_input": True,
+        "image_input": image_input,
+        "structured_output": structured_output,
+        "strict_json_schema": False,
+    }
+    profile.policy = {
+        "timeout_seconds": timeout_seconds,
+        "max_retries": max_retries,
+        "max_input_chars": max_input_chars,
+        "max_output_tokens": max_output_tokens,
+        "max_images": max_images,
+        "max_image_bytes": max_image_size_mb * 1024 * 1024,
+    }
+    binding = db.scalars(
+        select(ModelBinding)
+        .where(ModelBinding.provider_profile_id == profile.id)
+        .limit(1)
+    ).first()
+    if binding is None:
+        db.add(ModelBinding(role=role, provider_profile_id=profile.id))
+    else:
+        binding.role = role
     db.commit()
     return RedirectResponse("/admin", status_code=303)
 

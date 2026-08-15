@@ -20,26 +20,26 @@
   <div class="card"><h2>最近任务</h2>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span>{{ job.stage }}<small>{{ job.run_key }} · {{ job.started_at | fmt_time }}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</div>
 </section>
 <section class="card">
-  <h2>AI 模型目录</h2>
+  <div class="section-heading"><h2>{{ '编辑模型配置' if editing_profile else 'AI 模型目录' }}</h2>{% if editing_profile %}<a class="link-button" href="/admin">取消编辑</a>{% endif %}</div>
   <p class="muted">模型 API Key 只保存加密值。主模型可声明是否支持图片，视觉模型用于纯文本主模型的图片附件处理。</p>
-  <form method="post" action="/admin/models" class="form-grid" data-disable-on-submit>
+  <form method="post" action="{{ '/admin/models/' ~ editing_profile.id ~ '/edit' if editing_profile else '/admin/models' }}" class="form-grid" data-disable-on-submit>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <label>名称<input name="name" placeholder="本地 MLX 主模型" required></label>
-    <label>角色<select name="role"><option value="primary">Primary</option><option value="vision">Vision</option></select></label>
-    <label>OpenAI-compatible Base URL<input name="base_url" placeholder="http://127.0.0.1:8000/v1" required></label>
-    <label>模型名称<input name="model_name" placeholder="留空则自动读取 /models"></label>
-    <label>API Key<input type="password" name="api_key" placeholder="不会回显"></label>
-    <label class="check"><input type="checkbox" name="image_input"> 支持图片输入（主模型直接处理图片；纯文本主模型走视觉副模型）</label>
-    <label class="check"><input type="checkbox" name="structured_output" checked> 支持结构化输出</label>
-    <label>超时（秒）<input type="number" name="timeout_seconds" min="1" max="600" step="0.1" value="90"></label>
-    <label>重试次数<input type="number" name="max_retries" min="0" max="5" value="2"></label>
-    <label>最大输入字符<input type="number" name="max_input_chars" min="4096" max="2000000" value="120000"></label>
-    <label>最大输出 token<input type="number" name="max_output_tokens" min="128" max="32000" value="1800"></label>
-    <label>最大图片数<input type="number" name="max_images" min="1" max="100" value="20"></label>
-    <label>单图片上限（MB）<input type="number" name="max_image_size_mb" min="1" max="100" value="10"></label>
-    <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">保存模型配置</button></div>
+    <label>名称<input name="name" value="{{ model_form.name }}" placeholder="本地 MLX 主模型" required></label>
+    <label>角色<select name="role"><option value="primary" {% if model_form.role == 'primary' %}selected{% endif %}>Primary</option><option value="vision" {% if model_form.role == 'vision' %}selected{% endif %}>Vision</option></select></label>
+    <label>OpenAI-compatible Base URL<input name="base_url" value="{{ model_form.base_url }}" placeholder="http://127.0.0.1:8000/v1" required></label>
+    <label>模型名称<input name="model_name" value="{{ model_form.model_name }}" placeholder="留空则自动读取 /models"></label>
+    <label>API Key<input type="password" name="api_key" placeholder="{{ '不会回显，留空表示不修改' if editing_profile else '不会回显' }}"></label>
+    <label class="check"><input type="checkbox" name="image_input" {% if model_form.image_input %}checked{% endif %}> 支持图片输入（主模型直接处理图片；纯文本主模型走视觉副模型）</label>
+    <label class="check"><input type="checkbox" name="structured_output" {% if model_form.structured_output %}checked{% endif %}> 支持结构化输出</label>
+    <label>超时（秒）<input type="number" name="timeout_seconds" min="1" max="600" step="0.1" value="{{ model_form.timeout_seconds }}"></label>
+    <label>重试次数<input type="number" name="max_retries" min="0" max="5" value="{{ model_form.max_retries }}"></label>
+    <label>最大输入字符<input type="number" name="max_input_chars" min="4096" max="2000000" value="{{ model_form.max_input_chars }}"></label>
+    <label>最大输出 token<input type="number" name="max_output_tokens" min="128" max="32000" value="{{ model_form.max_output_tokens }}"></label>
+    <label>最大图片数<input type="number" name="max_images" min="1" max="100" value="{{ model_form.max_images }}"></label>
+    <label>单图片上限（MB）<input type="number" name="max_image_size_mb" min="1" max="100" value="{{ model_form.max_image_size_mb }}"></label>
+    <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">{{ '保存修改' if editing_profile else '保存模型配置' }}</button></div>
   </form>
-  {% if profiles %}<div class="list model-list">{% for profile in profiles %}<div class="list-item"><span>{{ profile.name }}<small>{{ profile.base_url }} · {{ profile.model_name or '自动选择模型' }}</small></span><span class="actions"><span class="tag {{ 'success' if profile.is_enabled else 'muted' }}">{{ '启用' if profile.is_enabled else '停用' }}</span><form method="post" action="/admin/models/{{ profile.id }}/toggle" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="处理中…">{{ '停用' if profile.is_enabled else '启用' }}</button></form><form method="post" action="/admin/models/{{ profile.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span></div>{% endfor %}</div>{% endif %}
+  {% if profiles %}<div class="list model-list">{% for profile in profiles %}<div class="list-item"><span>{{ profile.name }}<small>{{ profile.base_url }} · {{ profile.model_name or '自动选择模型' }}</small></span><span class="actions"><span class="tag {{ 'success' if profile.is_enabled else 'muted' }}">{{ '启用' if profile.is_enabled else '停用' }}</span><a class="link-button" href="/admin/models/{{ profile.id }}/edit">编辑</a><form method="post" action="/admin/models/{{ profile.id }}/toggle" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="处理中…">{{ '停用' if profile.is_enabled else '启用' }}</button></form><form method="post" action="/admin/models/{{ profile.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span></div>{% endfor %}</div>{% endif %}
 </section>
 <div class="notice">管理员默认只查看账号、任务和运行元数据，不显示普通用户邮件正文。</div>
 {% endblock %}
