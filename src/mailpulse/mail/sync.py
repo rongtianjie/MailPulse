@@ -3,17 +3,18 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
 from ..models import Attachment, CanonicalMessage, Mailbox, MessageOccurrence
 from ..search import SearchService
 from .connectors import MailConnector
-from .types import RawMessage, SyncCursor
+from .types import RawMessage, SyncBatch, SyncCursor
 
 
 def normalize_message_id(value: str | None) -> str | None:
@@ -52,24 +53,65 @@ class MailSyncService:
             cursor = SyncCursor(mailbox.sync_uid_validity, mailbox.sync_last_uid)
         batch = connector.sync_messages(cursor)
         result = SyncResult(fetched=len(batch.messages), cursor=batch.cursor)
-        storage_state = {
-            "user": self._stored_bytes(mailbox.user_id),
-            "global": self._stored_bytes(),
-        }
+        storage_state = self._storage_state(mailbox.user_id)
+        existing = self._prefetch_existing(mailbox, batch)
         for uid, raw_message in batch.messages:
             created = self._store_message(
-                mailbox, uid, batch.cursor.uid_validity, raw_message, storage_state
+                mailbox, uid, batch.cursor.uid_validity, raw_message, storage_state, existing
             )
             result.created += int(created)
             result.linked += int(not created)
             result.attachments += len(raw_message.attachments)
         mailbox.sync_uid_validity = batch.cursor.uid_validity
         mailbox.sync_last_uid = batch.cursor.last_uid
-        mailbox.last_synced_at = datetime.now().astimezone()
+        mailbox.last_synced_at = datetime.now(UTC)
         mailbox.sync_error = None
         self.session.flush()
         result.cursor = batch.cursor
         return result
+
+    def _prefetch_existing(self, mailbox: Mailbox, batch: SyncBatch) -> dict[str, Any]:
+        """Load dedup lookups for the whole batch in three queries instead of N+1."""
+        uids = [uid for uid, _ in batch.messages]
+        existing_uids: set[int] = set()
+        if uids:
+            rows = self.session.execute(
+                select(MessageOccurrence.uid).where(
+                    MessageOccurrence.mailbox_id == mailbox.id,
+                    MessageOccurrence.folder == mailbox.folder,
+                    MessageOccurrence.uid_validity == batch.cursor.uid_validity,
+                    MessageOccurrence.uid.in_(uids),
+                )
+            ).all()
+            existing_uids = {row[0] for row in rows}
+        normalized_ids = {
+            normalize_message_id(raw.message_id) for _, raw in batch.messages
+        }
+        normalized_ids.discard(None)
+        by_message_id: dict[str, CanonicalMessage] = {}
+        if normalized_ids:
+            for message in self.session.scalars(
+                select(CanonicalMessage).where(
+                    CanonicalMessage.owner_user_id == mailbox.user_id,
+                    CanonicalMessage.message_id.in_(normalized_ids),
+                )
+            ):
+                by_message_id.setdefault(str(message.message_id), message)
+        hashes = {message_content_hash(raw) for _, raw in batch.messages}
+        by_content_hash: dict[str, CanonicalMessage] = {}
+        if hashes:
+            for message in self.session.scalars(
+                select(CanonicalMessage).where(
+                    CanonicalMessage.owner_user_id == mailbox.user_id,
+                    CanonicalMessage.content_hash.in_(hashes),
+                )
+            ):
+                by_content_hash.setdefault(message.content_hash, message)
+        return {
+            "existing_uids": existing_uids,
+            "by_message_id": by_message_id,
+            "by_content_hash": by_content_hash,
+        }
 
     def _store_message(
         self,
@@ -78,33 +120,16 @@ class MailSyncService:
         uid_validity: str,
         raw: RawMessage,
         storage_state: dict[str, int],
+        existing: dict[str, Any],
     ) -> bool:
         normalized_id = normalize_message_id(raw.message_id)
         content_hash = message_content_hash(raw)
-        occurrence_query = select(MessageOccurrence).where(
-            MessageOccurrence.mailbox_id == mailbox.id,
-            MessageOccurrence.folder == mailbox.folder,
-            MessageOccurrence.uid_validity == uid_validity,
-            MessageOccurrence.uid == uid,
-        )
-        if self.session.scalar(occurrence_query):
+        if uid in existing["existing_uids"]:
             return False
 
-        canonical = None
-        if normalized_id:
-            canonical = self.session.scalar(
-                select(CanonicalMessage).where(
-                    CanonicalMessage.owner_user_id == mailbox.user_id,
-                    CanonicalMessage.message_id == normalized_id,
-                )
-            )
+        canonical = existing["by_message_id"].get(normalized_id) if normalized_id else None
         if canonical is None:
-            canonical = self.session.scalar(
-                select(CanonicalMessage).where(
-                    CanonicalMessage.owner_user_id == mailbox.user_id,
-                    CanonicalMessage.content_hash == content_hash,
-                )
-            )
+            canonical = existing["by_content_hash"].get(content_hash)
         is_new = canonical is None
         if canonical is None:
             canonical = CanonicalMessage(
@@ -205,15 +230,26 @@ class MailSyncService:
             storage_state["user"] += size_bytes
             storage_state["global"] += size_bytes
 
-    def _stored_bytes(self, user_id: int | None = None) -> int:
-        statement = (
-            select(func.coalesce(func.sum(Attachment.size_bytes), 0))
+    def _storage_state(self, user_id: int) -> dict[str, int]:
+        """User and global attachment quotas in a single aggregate query."""
+        row = self.session.execute(
+            select(
+                func.coalesce(func.sum(Attachment.size_bytes), 0),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (CanonicalMessage.owner_user_id == user_id, Attachment.size_bytes),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+            )
+            .select_from(Attachment)
             .join(CanonicalMessage, CanonicalMessage.id == Attachment.message_id)
             .where(Attachment.storage_path.is_not(None))
-        )
-        if user_id is not None:
-            statement = statement.where(CanonicalMessage.owner_user_id == user_id)
-        return int(self.session.scalar(statement) or 0)
+        ).one()
+        return {"user": int(row[1]), "global": int(row[0])}
 
 
 def _safe_filename(value: str) -> str:

@@ -10,6 +10,7 @@ from typing import Protocol
 from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
+from .errors import error_message
 from .models import AuditLog, Delivery, Mailbox, Report, utc_now
 from .security import decrypt_secret
 
@@ -31,21 +32,31 @@ class SMTPDeliveryProvider:
     def __init__(self, config: SMTPConfig):
         self.config = config
 
+    def _connect(self) -> smtplib.SMTP:
+        if self.config.use_tls and self.config.port == 465:
+            client = smtplib.SMTP_SSL(self.config.host, self.config.port, timeout=20)
+        else:
+            client = smtplib.SMTP(self.config.host, self.config.port, timeout=20)
+            if self.config.use_tls:
+                client.starttls()
+        client.login(self.config.username, self.config.password)
+        return client
+
+    def test_connection(self) -> None:
+        """Verify SMTP reachability and credentials without sending a message."""
+        client = self._connect()
+        try:
+            client.quit()
+        except smtplib.SMTPException:
+            pass
+
     def send(self, sender: str, recipient: str, subject: str, body: str) -> None:
         message = EmailMessage()
         message["From"] = sender
         message["To"] = recipient
         message["Subject"] = _safe_subject(subject)
         message.set_content(body)
-        if self.config.use_tls and self.config.port == 465:
-            with smtplib.SMTP_SSL(self.config.host, self.config.port, timeout=20) as client:
-                client.login(self.config.username, self.config.password)
-                client.send_message(message)
-            return
-        with smtplib.SMTP(self.config.host, self.config.port, timeout=20) as client:
-            if self.config.use_tls:
-                client.starttls()
-            client.login(self.config.username, self.config.password)
+        with self._connect() as client:
             client.send_message(message)
 
 
@@ -146,7 +157,7 @@ class ReportDeliveryService:
             )
         except Exception as exc:
             delivery.status = "failed"
-            delivery.error_message = f"{type(exc).__name__}: SMTP 投递失败"
+            delivery.error_message = error_message(exc, "SMTP 投递失败")
             delivery.sent_at = None
             return
         delivery.status = "sent"

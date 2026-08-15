@@ -13,27 +13,27 @@
     <h2>快速开始</h2>
     <ol class="steps">
       <li class="{{ 'done' if mailbox else '' }}">配置邮箱连接</li>
-      <li>运行同步任务</li>
-      <li>选择规则并生成报告</li>
+      <li class="{{ 'done' if message_count > 0 else '' }}">运行同步任务</li>
+      <li class="{{ 'done' if reports else '' }}">选择规则并生成报告</li>
     </ol>
     <div class="actions">
       <a class="button" href="/settings">邮箱设置</a>
-      {% if mailbox %}<form method="post" action="/sync"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit">立即同步</button></form>{% endif %}
+      {% if mailbox %}<form method="post" action="/sync" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" data-processing-label="同步中…">立即同步</button></form>{% endif %}
     </div>
   </div>
   <div class="card">
     <h2>报告生成</h2>
     <p class="muted">系统会按已配置的邮箱、筛选规则和模型生成结构化报告。</p>
-    <form method="post" action="/reports/generate" class="actions">
+    <form method="post" action="/reports/generate" class="actions" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="primary" type="submit">生成报告</button>
+      <button class="primary" type="submit" data-processing-label="生成中…">生成报告</button>
     </form>
   </div>
 </section>
 <section class="card">
   <div class="section-heading"><h2>最近报告</h2><a href="/reports">查看全部</a></div>
   {% if reports %}
-  <div class="list">{% for report in reports %}<a class="list-item" href="/reports/{{ report.id }}"><span>{{ report.title }}</span><span class="muted">{{ report.created_at }}</span></a>{% endfor %}</div>
+  <div class="list">{% for report in reports %}<a class="list-item" href="/reports/{{ report.id }}"><span>{{ report.title }}</span><span class="muted">{{ report.created_at | fmt_time }}</span></a>{% endfor %}</div>
   {% else %}<p class="empty">暂无报告。完成邮箱同步后即可生成报告。</p>{% endif %}
 </section>
 {% endblock %}

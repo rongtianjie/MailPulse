@@ -7,29 +7,29 @@
   <div class="card">
     <h2>用户</h2>
     <p class="muted">为公司内网用户创建独立账号；普通用户只能访问自己的邮箱、规则和报告。</p>
-    <form method="post" action="/admin/users" class="stack">
+    <form method="post" action="/admin/users" class="stack" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>账号邮箱<input type="email" name="email" required></label>
       <label>显示名称<input name="display_name" placeholder="可选"></label>
       <label>初始密码<input type="password" name="password" minlength="8" required></label>
       <label>角色<select name="role"><option value="user">普通用户</option><option value="admin">管理员</option></select></label>
-      <button class="primary" type="submit">创建账号</button>
+      <button class="primary" type="submit" data-processing-label="创建中…">创建账号</button>
     </form>
-    <div class="list">{% for item in users %}<div class="list-item"><span>{{ item.display_name }}<small>{{ item.email }}</small></span><span class="tag">{{ item.role }}</span></div>{% endfor %}</div>
+    <div class="list">{% for item in users %}<div class="list-item"><span>{{ item.display_name }}<small>{{ item.email }}{% if not item.is_active %} · 已停用{% endif %}</small></span><span class="actions"><span class="tag">{{ item.role }}</span>{% if item.id != user.id %}<form method="post" action="/admin/users/{{ item.id }}/toggle" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="处理中…">{{ '停用' if item.is_active else '启用' }}</button></form>{% endif %}</span></div>{% endfor %}</div>
   </div>
-  <div class="card"><h2>最近任务</h2>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span>{{ job.stage }}<small>{{ job.run_key }}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</div>
+  <div class="card"><h2>最近任务</h2>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span>{{ job.stage }}<small>{{ job.run_key }} · {{ job.started_at | fmt_time }}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</div>
 </section>
 <section class="card">
   <h2>AI 模型目录</h2>
   <p class="muted">模型 API Key 只保存加密值。主模型可声明是否支持图片，视觉模型用于纯文本主模型的图片附件处理。</p>
-  <form method="post" action="/admin/models" class="form-grid">
+  <form method="post" action="/admin/models" class="form-grid" data-disable-on-submit>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>名称<input name="name" placeholder="本地 MLX 主模型" required></label>
     <label>角色<select name="role"><option value="primary">Primary</option><option value="vision">Vision</option></select></label>
     <label>OpenAI-compatible Base URL<input name="base_url" placeholder="http://127.0.0.1:8000/v1" required></label>
     <label>模型名称<input name="model_name" placeholder="留空则自动读取 /models"></label>
     <label>API Key<input type="password" name="api_key" placeholder="不会回显"></label>
-    <label class="check"><input type="checkbox" name="image_input"> 主模型支持图片输入</label>
+    <label class="check"><input type="checkbox" name="image_input"> 支持图片输入（主模型直接处理图片；纯文本主模型走视觉副模型）</label>
     <label class="check"><input type="checkbox" name="structured_output" checked> 支持结构化输出</label>
     <label>超时（秒）<input type="number" name="timeout_seconds" min="1" max="600" step="0.1" value="90"></label>
     <label>重试次数<input type="number" name="max_retries" min="0" max="5" value="2"></label>
@@ -37,9 +37,9 @@
     <label>最大输出 token<input type="number" name="max_output_tokens" min="128" max="32000" value="1800"></label>
     <label>最大图片数<input type="number" name="max_images" min="1" max="100" value="20"></label>
     <label>单图片上限（MB）<input type="number" name="max_image_size_mb" min="1" max="100" value="10"></label>
-    <div class="form-actions"><button class="primary" type="submit">保存模型配置</button></div>
+    <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">保存模型配置</button></div>
   </form>
-  {% if profiles %}<div class="list model-list">{% for profile in profiles %}<div class="list-item"><span>{{ profile.name }}<small>{{ profile.base_url }} · {{ profile.model_name or '自动选择模型' }}</small></span><span class="tag">{{ '启用' if profile.is_enabled else '停用' }}</span></div>{% endfor %}</div>{% endif %}
+  {% if profiles %}<div class="list model-list">{% for profile in profiles %}<div class="list-item"><span>{{ profile.name }}<small>{{ profile.base_url }} · {{ profile.model_name or '自动选择模型' }}</small></span><span class="actions"><span class="tag {{ 'success' if profile.is_enabled else 'muted' }}">{{ '启用' if profile.is_enabled else '停用' }}</span><form method="post" action="/admin/models/{{ profile.id }}/toggle" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="处理中…">{{ '停用' if profile.is_enabled else '启用' }}</button></form><form method="post" action="/admin/models/{{ profile.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span></div>{% endfor %}</div>{% endif %}
 </section>
 <div class="notice">管理员默认只查看账号、任务和运行元数据，不显示普通用户邮件正文。</div>
 {% endblock %}

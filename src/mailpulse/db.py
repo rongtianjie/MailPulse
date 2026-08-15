@@ -44,7 +44,14 @@ def init_database(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
     _run_schema_migrations(settings)
     engine = build_engine(settings)
-    SearchService.ensure_index(engine)
+    index_state = SearchService.ensure_index(engine)
+    if index_state in {"created", "rebuilt"}:
+        # A fresh or rebuilt FTS index must be backfilled from existing messages.
+        session = build_session_factory(settings)()
+        try:
+            SearchService(session).reindex_all()
+        finally:
+            session.close()
 
 
 def _run_schema_migrations(settings: Settings) -> None:

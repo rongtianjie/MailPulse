@@ -38,6 +38,9 @@ class MarkItDownAttachmentConverter:
                 warning = (attachment.conversion_warnings or ["附件未进入转换流程"])[0]
                 return self._finish(session, attachment, status, warning)
             return self._finish(session, attachment, "failed", "附件本地内容不存在")
+        cached = self._cached_result(attachment)
+        if cached is not None:
+            return cached
         source = Path(attachment.storage_path)
         if not source.is_file():
             return self._finish(session, attachment, "failed", "附件文件不存在")
@@ -82,6 +85,31 @@ class MarkItDownAttachmentConverter:
             warnings=warnings,
             status="converted",
             converter_version=self.converter_version,
+        )
+
+    def _cached_result(self, attachment: Attachment) -> ConvertedAttachment | None:
+        """Reuse a previous conversion result instead of re-running MarkItDown."""
+        if attachment.conversion_status != "converted" or not attachment.markdown_path:
+            return None
+        path = Path(attachment.markdown_path)
+        if not path.is_file():
+            return None
+        try:
+            path.resolve().relative_to(self.settings.conversions_dir.resolve())
+        except ValueError:
+            return None
+        try:
+            markdown = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        return ConvertedAttachment(
+            attachment_id=attachment.id,
+            markdown_path=str(path),
+            markdown_content=markdown,
+            image_assets=list(attachment.image_assets),
+            warnings=list(attachment.conversion_warnings),
+            status="converted",
+            converter_version=attachment.converter_version or self.converter_version,
         )
 
     def _collect_image_assets(

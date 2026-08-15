@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -10,12 +11,15 @@ from sqlalchemy import select
 from .config import Settings, get_settings
 from .db import build_session_factory
 from .delivery import ReportDeliveryService
+from .errors import error_message
 from .mail.connectors import IMAPConnector
 from .mail.sync import MailSyncService
 from .mail.types import MailboxConnection
 from .models import Delivery, JobRun, Mailbox, Schedule, User
 from .report_service import ReportService
 from .security import decrypt_secret
+
+logger = logging.getLogger("mailpulse.worker")
 
 
 def run_due_schedules(settings: Settings | None = None) -> int:
@@ -33,7 +37,7 @@ def run_due_schedules(settings: Settings | None = None) -> int:
                 completed += int(_run_schedule(session, schedule, now, scheduled_fire, settings))
             except Exception as exc:
                 session.rollback()
-                print(f"schedule {schedule.id} failed: {type(exc).__name__}")
+                logger.error("schedule %s failed: %s", schedule.id, type(exc).__name__)
         return completed
     finally:
         session.close()
@@ -215,11 +219,11 @@ def _run_schedule(
             session.add(job)
         job.stage = stage
         job.status = "failed"
-        job.error_message = f"{type(exc).__name__}: 任务在 {stage} 阶段失败"
+        job.error_message = error_message(exc, f"任务在 {stage} 阶段失败")
         job.details = {"error_type": type(exc).__name__, "stage": stage}
         job.finished_at = datetime.now(UTC)
         session.commit()
-        print(f"schedule {schedule.id} failed at {stage}: {type(exc).__name__}")
+        logger.error("schedule %s failed at %s: %s", schedule.id, stage, type(exc).__name__)
         return False
 
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from math import ceil
 from pathlib import Path
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -12,8 +15,9 @@ from sqlalchemy.orm import Session
 
 from ..auth import authenticate, create_user
 from ..config import get_settings
-from ..delivery import ReportDeliveryService
+from ..delivery import ReportDeliveryService, SMTPConfig, SMTPDeliveryProvider
 from ..demo import seed_demo
+from ..errors import error_message
 from ..mail.connectors import IMAPConnector
 from ..mail.sync import MailSyncService
 from ..mail.types import MailboxConnection
@@ -42,10 +46,48 @@ from .rate_limit import get_login_rate_limiter
 templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templates"))
 router = APIRouter()
 
+DEFAULT_TIMEZONE = "Asia/Shanghai"
+MESSAGES_PAGE_SIZE = 50
+
+
+def _fmt_time(value, tz: str = DEFAULT_TIMEZONE) -> str:
+    """Render a stored datetime in the user-facing timezone."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    try:
+        zone = ZoneInfo(tz)
+    except Exception:
+        zone = ZoneInfo(DEFAULT_TIMEZONE)
+    return value.astimezone(zone).strftime("%Y-%m-%d %H:%M")
+
+
+templates.env.filters["fmt_time"] = _fmt_time
+
 
 def _render(request: Request, template: str, **context):
     context.setdefault("csrf_token", get_csrf_token(request))
     return templates.TemplateResponse(request=request, name=template, context=context)
+
+
+def _build_imap_connector(mailbox: Mailbox, settings) -> IMAPConnector:
+    password = decrypt_secret(mailbox.credential_encrypted, settings)
+    return IMAPConnector(
+        MailboxConnection(
+            host=mailbox.imap_host,
+            port=mailbox.imap_port,
+            username=mailbox.username,
+            password=password,
+            tls=mailbox.imap_tls,
+            folder=mailbox.folder,
+        )
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -129,6 +171,7 @@ def settings_page(
         error=None,
         saved=False,
         tested=False,
+        tested_smtp=False,
     )
 
 
@@ -242,8 +285,46 @@ def toggle_schedule(
     return RedirectResponse("/schedules", status_code=303)
 
 
+@router.post("/schedules/{schedule_id}/delete")
+def delete_schedule(
+    request: Request,
+    schedule_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    schedule = db.scalar(
+        select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user.id)
+    )
+    if schedule is None:
+        return HTMLResponse("任务不存在", status_code=404)
+    db.delete(schedule)
+    db.commit()
+    return RedirectResponse("/schedules", status_code=303)
+
+
 @router.get("/rules", response_class=HTMLResponse)
 def rules_page(request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _render_rules_page(
+        request,
+        user,
+        db,
+        definition=json.dumps(MATCH_ALL, ensure_ascii=False, indent=2),
+        error=None,
+    )
+
+
+def _render_rules_page(
+    request: Request,
+    user: User,
+    db: Session,
+    definition: str,
+    error: str | None,
+    name: str | None = None,
+    priority: int | None = None,
+    editing_rule: RuleSet | None = None,
+):
     rule_sets = list(
         db.scalars(
             select(RuleSet).where(RuleSet.user_id == user.id).order_by(RuleSet.priority.asc())
@@ -254,8 +335,11 @@ def rules_page(request: Request, user: User = Depends(current_user), db: Session
         "rules.html",
         user=user,
         rule_sets=rule_sets,
-        default_definition=json.dumps(MATCH_ALL, ensure_ascii=False, indent=2),
-        error=None,
+        definition=definition,
+        error=error,
+        form_name=name,
+        form_priority=priority,
+        editing_rule=editing_rule,
     )
 
 
@@ -277,19 +361,96 @@ def create_rule_set(
         db.commit()
         return RedirectResponse("/rules", status_code=303)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        rule_sets = list(
-            db.scalars(
-                select(RuleSet).where(RuleSet.user_id == user.id).order_by(RuleSet.priority.asc())
-            )
-        )
-        return _render(
+        return _render_rules_page(
             request,
-            "rules.html",
-            user=user,
-            rule_sets=rule_sets,
-            default_definition=definition,
+            user,
+            db,
+            definition=definition,
             error=f"规则无效：{exc}",
+            name=name,
+            priority=priority,
         )
+
+
+@router.get("/rules/{rule_id}/edit", response_class=HTMLResponse)
+def edit_rule_page(
+    request: Request,
+    rule_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    rule_set = db.scalar(
+        select(RuleSet).where(RuleSet.id == rule_id, RuleSet.user_id == user.id)
+    )
+    if rule_set is None:
+        return HTMLResponse("规则集不存在", status_code=404)
+    return _render_rules_page(
+        request,
+        user,
+        db,
+        definition=json.dumps(rule_set.definition, ensure_ascii=False, indent=2),
+        error=None,
+        name=rule_set.name,
+        priority=rule_set.priority,
+        editing_rule=rule_set,
+    )
+
+
+@router.post("/rules/{rule_id}/edit")
+def update_rule_set(
+    request: Request,
+    rule_id: int,
+    name: str = Form(...),
+    definition: str = Form(...),
+    priority: int = Form(100),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    rule_set = db.scalar(
+        select(RuleSet).where(RuleSet.id == rule_id, RuleSet.user_id == user.id)
+    )
+    if rule_set is None:
+        return HTMLResponse("规则集不存在", status_code=404)
+    try:
+        parsed = json.loads(definition)
+        RuleService(db).validate(parsed)
+        rule_set.name = name.strip()
+        rule_set.priority = priority
+        rule_set.definition = parsed
+        db.commit()
+        return RedirectResponse("/rules", status_code=303)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return _render_rules_page(
+            request,
+            user,
+            db,
+            definition=definition,
+            error=f"规则无效：{exc}",
+            name=name,
+            priority=priority,
+            editing_rule=rule_set,
+        )
+
+
+@router.post("/rules/{rule_id}/delete")
+def delete_rule_set(
+    request: Request,
+    rule_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    rule_set = db.scalar(
+        select(RuleSet).where(RuleSet.id == rule_id, RuleSet.user_id == user.id)
+    )
+    if rule_set is None:
+        return HTMLResponse("规则集不存在", status_code=404)
+    db.delete(rule_set)
+    db.commit()
+    return RedirectResponse("/rules", status_code=303)
 
 
 @router.post("/settings", response_class=HTMLResponse)
@@ -318,6 +479,7 @@ def save_settings(
                 error="首次配置必须填写邮箱密码",
                 saved=False,
                 tested=False,
+                tested_smtp=False,
             )
         mailbox = Mailbox(
             user_id=user.id,
@@ -349,6 +511,7 @@ def save_settings(
         error=None,
         saved=True,
         tested=False,
+        tested_smtp=False,
     )
 
 
@@ -364,16 +527,61 @@ def test_settings_connection(
     if mailbox is None:
         return RedirectResponse("/settings", status_code=303)
     try:
-        settings = get_settings()
-        password = decrypt_secret(mailbox.credential_encrypted, settings)
-        IMAPConnector(
-            MailboxConnection(
-                host=mailbox.imap_host,
-                port=mailbox.imap_port,
+        _build_imap_connector(mailbox, get_settings()).test_connection()
+        return _render(
+            request,
+            "settings.html",
+            user=user,
+            mailbox=mailbox,
+            error=None,
+            saved=False,
+            tested=True,
+            tested_smtp=False,
+        )
+    except Exception as exc:
+        return _render(
+            request,
+            "settings.html",
+            user=user,
+            mailbox=mailbox,
+            error=f"连接测试失败：{error_message(exc)}",
+            saved=False,
+            tested=False,
+            tested_smtp=False,
+        )
+
+
+@router.post("/settings/test-smtp")
+def test_smtp_connection(
+    request: Request,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    mailbox = db.scalar(select(Mailbox).where(Mailbox.user_id == user.id))
+    if mailbox is None:
+        return RedirectResponse("/settings", status_code=303)
+    if not mailbox.smtp_host:
+        return _render(
+            request,
+            "settings.html",
+            user=user,
+            mailbox=mailbox,
+            error="SMTP 主机未配置，无法验证连接",
+            saved=False,
+            tested=False,
+            tested_smtp=False,
+        )
+    try:
+        password = decrypt_secret(mailbox.credential_encrypted, get_settings())
+        SMTPDeliveryProvider(
+            SMTPConfig(
+                host=mailbox.smtp_host,
+                port=mailbox.smtp_port,
                 username=mailbox.username,
                 password=password,
-                tls=mailbox.imap_tls,
-                folder=mailbox.folder,
+                use_tls=mailbox.smtp_tls,
             )
         ).test_connection()
         return _render(
@@ -383,7 +591,8 @@ def test_settings_connection(
             mailbox=mailbox,
             error=None,
             saved=False,
-            tested=True,
+            tested=False,
+            tested_smtp=True,
         )
     except Exception as exc:
         return _render(
@@ -391,9 +600,10 @@ def test_settings_connection(
             "settings.html",
             user=user,
             mailbox=mailbox,
-            error=f"连接测试失败：{type(exc).__name__}",
+            error=f"SMTP 连接测试失败：{error_message(exc)}",
             saved=False,
             tested=False,
+            tested_smtp=False,
         )
 
 
@@ -409,25 +619,14 @@ def sync_now(
     if mailbox is None:
         return RedirectResponse("/settings", status_code=303)
     try:
-        settings = get_settings()
-        password = decrypt_secret(mailbox.credential_encrypted, settings)
-        connector = IMAPConnector(
-            MailboxConnection(
-                host=mailbox.imap_host,
-                port=mailbox.imap_port,
-                username=mailbox.username,
-                password=password,
-                tls=mailbox.imap_tls,
-                folder=mailbox.folder,
-            )
-        )
-        MailSyncService(db, settings).sync(mailbox, connector)
+        connector = _build_imap_connector(mailbox, get_settings())
+        MailSyncService(db, get_settings()).sync(mailbox, connector)
         db.commit()
     except Exception as exc:
         db.rollback()
         mailbox = db.scalar(select(Mailbox).where(Mailbox.user_id == user.id))
         if mailbox:
-            mailbox.sync_error = f"{type(exc).__name__}: 邮箱同步失败"
+            mailbox.sync_error = error_message(exc, "邮箱同步失败")
             db.commit()
     return RedirectResponse("/", status_code=303)
 
@@ -580,11 +779,35 @@ def retry_report_delivery(
 def messages_page(
     request: Request,
     q: str = "",
+    status: str = "",
+    page: int = 1,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    messages = SearchService(db).search(user.id, q)
-    return _render(request, "messages.html", user=user, messages=messages, query=q)
+    status = status if status in {"unprocessed", "processed", "starred"} else ""
+    page = max(1, page)
+    service = SearchService(db)
+    total = service.count(user.id, q, status)
+    pages = max(1, ceil(total / MESSAGES_PAGE_SIZE))
+    page = min(page, pages)
+    messages = service.search(
+        user.id,
+        q,
+        status=status,
+        limit=MESSAGES_PAGE_SIZE,
+        offset=(page - 1) * MESSAGES_PAGE_SIZE,
+    )
+    return _render(
+        request,
+        "messages.html",
+        user=user,
+        messages=messages,
+        query=q,
+        status=status,
+        page=page,
+        pages=pages,
+        total=total,
+    )
 
 
 def _owned_message(db: Session, user: User, message_id: int) -> CanonicalMessage | None:
@@ -651,6 +874,25 @@ def add_message_label(
     normalized = label.strip()[:80]
     if normalized and normalized not in message.local_labels:
         message.local_labels = [*message.local_labels, normalized]
+        db.commit()
+    return RedirectResponse(_safe_referer(request), status_code=303)
+
+
+@router.post("/messages/{message_id}/labels/delete")
+def delete_message_label(
+    request: Request,
+    message_id: int,
+    label: str = Form(...),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    message = _owned_message(db, user, message_id)
+    if message is None:
+        return HTMLResponse("邮件不存在", status_code=404)
+    if label in message.local_labels:
+        message.local_labels = [item for item in message.local_labels if item != label]
         db.commit()
     return RedirectResponse(_safe_referer(request), status_code=303)
 
@@ -771,5 +1013,58 @@ def create_model_profile(
     db.add(profile)
     db.flush()
     db.add(ModelBinding(role=role, provider_profile_id=profile.id))
+    db.commit()
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/models/{profile_id}/toggle")
+def toggle_model_profile(
+    request: Request,
+    profile_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    profile = db.get(AIProviderProfile, profile_id)
+    if profile is None:
+        return HTMLResponse("模型配置不存在", status_code=404)
+    profile.is_enabled = not profile.is_enabled
+    db.commit()
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/models/{profile_id}/delete")
+def delete_model_profile(
+    request: Request,
+    profile_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    profile = db.get(AIProviderProfile, profile_id)
+    if profile is None:
+        return HTMLResponse("模型配置不存在", status_code=404)
+    db.delete(profile)
+    db.commit()
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/toggle")
+def toggle_user_active(
+    request: Request,
+    user_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    target = db.get(User, user_id)
+    if target is None:
+        return HTMLResponse("账号不存在", status_code=404)
+    if target.id == user.id:
+        return _render_admin_page(request, user, db, error="不能停用自己的账号")
+    target.is_active = not target.is_active
     db.commit()
     return RedirectResponse("/admin", status_code=303)

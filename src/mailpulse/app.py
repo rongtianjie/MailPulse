@@ -8,16 +8,13 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from .config import get_settings
-from .db import build_engine, init_database
-from .search import SearchService
+from .db import init_database
 from .web.routes import router
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     init_database(settings)
-    engine = build_engine(settings)
-    SearchService.ensure_index(engine)
     app = FastAPI(title="MailPulse", version="0.1.0")
     app.add_middleware(
         SessionMiddleware,

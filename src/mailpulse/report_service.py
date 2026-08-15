@@ -117,6 +117,8 @@ class ReportService:
             summary.attachment_status = list(
                 dict.fromkeys([*conversion_status, *summary.attachment_status])
             )
+        summary_payload = summary.model_dump(mode="json")
+        summary_payload["message_count"] = len(messages)
         report = Report(
             user_id=user.id,
             mailbox_id=mailbox.id,
@@ -126,7 +128,7 @@ class ReportService:
             period_end=end,
             status="success",
             title="邮件归纳报告",
-            summary=summary.model_dump(mode="json"),
+            summary=summary_payload,
             rendered_markdown=render_summary_markdown(summary, start, end),
             model_trace=trace,
         )

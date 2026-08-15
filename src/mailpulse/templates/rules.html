@@ -4,17 +4,17 @@
 <div class="page-heading"><div><p class="eyebrow">确定性筛选</p><h1>筛选规则</h1></div></div>
 <section class="grid-2">
   <div class="card">
-    <h2>新增规则集</h2>
+    <div class="section-heading"><h2>{{ '编辑规则集' if editing_rule else '新增规则集' }}</h2>{% if editing_rule %}<a class="link-button" href="/rules">取消编辑</a>{% endif %}</div>
     <p class="muted">规则在 AI 归纳之前执行。使用 <code>match_all</code> 可保留全部邮件。</p>
     {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
-    <form method="post" action="/rules" class="stack">
+    <form method="post" action="{{ '/rules/' ~ editing_rule.id ~ '/edit' if editing_rule else '/rules' }}" class="stack" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>名称<input name="name" value="工作邮件" required></label>
-      <label>优先级（数字越小越优先）<input type="number" name="priority" value="100"></label>
+      <label>名称<input name="name" value="{{ form_name or (editing_rule.name if editing_rule else '工作邮件') }}" required></label>
+      <label>优先级（数字越小越优先）<input type="number" name="priority" value="{{ form_priority or (editing_rule.priority if editing_rule else 100) }}"></label>
       <label>DSL JSON
-        <textarea name="definition" rows="14" required>{{ default_definition }}</textarea>
+        <textarea name="definition" rows="14" required>{{ definition }}</textarea>
       </label>
-      <button class="primary" type="submit">保存规则集</button>
+      <button class="primary" type="submit" data-processing-label="保存中…">{{ '保存修改' if editing_rule else '保存规则集' }}</button>
     </form>
   </div>
   <div class="card">
@@ -27,8 +27,11 @@
     {"kind":"condition","field":"body_text","operator":"contains","value":"项目"}
   ]
 }</pre>
+    <h2>可用字段与操作符</h2>
+    <p class="muted compact">字段：<code>subject</code> <code>sender</code> <code>recipients</code> <code>cc</code> <code>body_text</code> <code>received_at</code> <code>local_labels</code> <code>local_starred</code> <code>local_processed</code> <code>attachment_name</code> <code>attachment_type</code> <code>attachment_size</code></p>
+    <p class="muted compact">操作符：<code>equals</code> <code>contains</code> <code>starts_with</code> <code>ends_with</code> <code>regex</code> <code>greater_than</code> <code>less_than</code> <code>in</code> <code>exists</code></p>
     <h2>已保存规则</h2>
-    {% if rule_sets %}<div class="list">{% for rule in rule_sets %}<div class="list-item"><span>{{ rule.name }}<small>优先级 {{ rule.priority }} · {{ '启用' if rule.is_enabled else '停用' }}</small></span><span class="tag">{{ rule.id }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无规则集，报告默认处理全部邮件。</p>{% endif %}
+    {% if rule_sets %}<div class="list">{% for rule in rule_sets %}<div class="list-item"><span>{{ rule.name }}<small>优先级 {{ rule.priority }} · {{ '启用' if rule.is_enabled else '停用' }}</small></span><span class="actions"><a class="link-button" href="/rules/{{ rule.id }}/edit">编辑</a><form method="post" action="/rules/{{ rule.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span></div>{% endfor %}</div>{% else %}<p class="empty">暂无规则集，报告默认处理全部邮件。</p>{% endif %}
   </div>
 </section>
 {% endblock %}

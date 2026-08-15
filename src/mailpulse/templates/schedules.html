@@ -7,7 +7,7 @@
   <div class="card">
     <h2>新增任务</h2>
     {% if mailboxes %}
-    <form method="post" action="/schedules" class="form-grid">
+    <form method="post" action="/schedules" class="form-grid" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>任务名称<input name="name" value="每日邮件报告" required></label>
       <label>邮箱<select name="mailbox_id" required>{% for mailbox in mailboxes %}<option value="{{ mailbox.id }}">{{ mailbox.name }}（{{ mailbox.email_address }}）</option>{% endfor %}</select></label>
@@ -39,8 +39,8 @@
   <div class="list">
     {% for schedule in schedules %}
     <div class="list-item">
-      <span><strong>{{ schedule.name }}</strong><small>{{ schedule.cron_expression }} · {{ schedule.timezone }} · 回看 {{ schedule.lookback_hours }} 小时{% if schedule.last_run_at %} · 上次成功 {{ schedule.last_run_at }}{% endif %}</small></span>
-      <span class="actions"><span class="tag {{ 'success' if schedule.is_enabled else 'muted' }}">{{ '启用' if schedule.is_enabled else '停用' }}</span><form method="post" action="/schedules/{{ schedule.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if schedule.is_enabled else '启用' }}</button></form></span>
+      <span><strong>{{ schedule.name }}</strong><small>{{ schedule.cron_expression }} · {{ schedule.timezone }} · 回看 {{ schedule.lookback_hours }} 小时{% if schedule.last_run_at %} · 上次成功 {{ schedule.last_run_at | fmt_time }}{% endif %}</small></span>
+      <span class="actions"><span class="tag {{ 'success' if schedule.is_enabled else 'muted' }}">{{ '启用' if schedule.is_enabled else '停用' }}</span><form method="post" action="/schedules/{{ schedule.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if schedule.is_enabled else '启用' }}</button></form><form method="post" action="/schedules/{{ schedule.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form></span>
     </div>
     {% endfor %}
   </div>

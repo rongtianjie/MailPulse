@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ report.title }} - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start }} 至 {{ report.period_end }}</p></div><span class="tag {{ report.status }}">{{ report.status }}</span></div>
+<div class="page-heading"><div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</p></div><span class="tag {{ report.status }}">{{ report.status }}</span></div>
 <section class="card report-card">
   <pre class="report-content">{{ report.rendered_markdown }}</pre>
 </section>
@@ -9,17 +9,17 @@
   <div class="section-heading"><h2>邮件投递</h2></div>
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
   {% if request.query_params.get('delivery') == 'sent' %}<div class="alert success">报告已发送。</div>{% endif %}
-  <form method="post" action="/reports/{{ report.id }}/send" class="actions">
+  <form method="post" action="/reports/{{ report.id }}/send" class="actions" data-disable-on-submit>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label class="inline-field">收件人<input type="email" name="recipient" value="{{ user.email }}" required></label>
-    <button class="primary" type="submit">通过 SMTP 发送</button>
+    <button class="primary" type="submit" data-processing-label="发送中…">通过 SMTP 发送</button>
   </form>
   {% if deliveries %}
   <div class="list delivery-list">
     {% for delivery in deliveries %}
     <div class="list-item">
-      <span>{{ delivery.destination }}<small>尝试 {{ delivery.attempts }} 次 · {{ delivery.created_at }}</small></span>
-      <span class="actions"><span class="tag {{ delivery.status }}">{{ delivery.status }}</span>{% if delivery.status == 'failed' %}<form method="post" action="/deliveries/{{ delivery.id }}/retry"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">重试</button></form>{% endif %}</span>
+      <span>{{ delivery.destination }}<small>尝试 {{ delivery.attempts }} 次 · {{ delivery.created_at | fmt_time }}{% if delivery.error_message %} · {{ delivery.error_message }}{% endif %}</small></span>
+      <span class="actions"><span class="tag {{ delivery.status }}">{{ delivery.status }}</span>{% if delivery.status == 'failed' %}<form method="post" action="/deliveries/{{ delivery.id }}/retry" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="重试中…">重试</button></form>{% endif %}</span>
     </div>
     {% endfor %}
   </div>

@@ -1,10 +1,47 @@
 {% extends "base.html" %}
 {% block title %}邮件 - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">本地邮件索引</p><h1>邮件</h1></div></div>
+<div class="page-heading"><div><p class="eyebrow">本地邮件索引</p><h1>邮件</h1><p class="muted">共 {{ total }} 封匹配邮件</p></div></div>
 <section class="card">
-  <form method="get" action="/messages" class="search-bar"><input name="q" value="{{ query }}" placeholder="搜索主题、发件人或正文"><button class="secondary" type="submit">搜索</button></form>
-  {% if messages %}<div class="list">{% for message in messages %}<div class="message-item"><div><strong>{{ message.subject or '(无主题)' }}</strong><p class="muted">{{ message.sender }} · {{ message.received_at }}</p>{% if message.local_labels %}<small>{{ message.local_labels|join(' · ') }}</small>{% endif %}</div><span class="actions message-actions"><span class="tag">{{ '已处理' if message.local_processed else '未处理' }}</span><span class="tag">{{ '已加星' if message.local_starred else '未加星' }}</span><form method="post" action="/messages/{{ message.id }}/toggle-processed"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '取消处理' if message.local_processed else '标记处理' }}</button></form><form method="post" action="/messages/{{ message.id }}/toggle-starred"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '取消星标' if message.local_starred else '加星' }}</button></form><form class="label-form" method="post" action="/messages/{{ message.id }}/labels"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="label" placeholder="添加标签" aria-label="添加标签"><button class="link-button" type="submit">添加</button></form></span></div>{% endfor %}</div>
+  <form method="get" action="/messages" class="search-bar">
+    <input name="q" value="{{ query }}" placeholder="搜索主题、发件人或正文">
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    <button class="secondary" type="submit">搜索</button>
+  </form>
+  <nav class="filter-tabs">
+    <a class="{{ 'active' if status == '' else '' }}" href="/messages{% if query %}?q={{ query }}{% endif %}">全部</a>
+    <a class="{{ 'active' if status == 'unprocessed' else '' }}" href="/messages?status=unprocessed{% if query %}&q={{ query }}{% endif %}">未处理</a>
+    <a class="{{ 'active' if status == 'processed' else '' }}" href="/messages?status=processed{% if query %}&q={{ query }}{% endif %}">已处理</a>
+    <a class="{{ 'active' if status == 'starred' else '' }}" href="/messages?status=starred{% if query %}&q={{ query }}{% endif %}">已加星</a>
+  </nav>
+  {% if messages %}
+  <div class="list">
+    {% for message in messages %}
+    <div class="message-item">
+      <div>
+        <strong>{{ message.subject or '(无主题)' }}</strong>
+        <p class="muted">{{ message.sender }} · {{ message.received_at | fmt_time }}</p>
+        {% if message.local_labels %}
+        <p class="label-row">{% for label in message.local_labels %}<span class="tag label-tag">{{ label }}<form method="post" action="/messages/{{ message.id }}/labels/delete" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="label" value="{{ label }}"><button class="label-remove" type="submit" title="删除标签 {{ label }}" aria-label="删除标签 {{ label }}">×</button></form></span>{% endfor %}</p>
+        {% endif %}
+      </div>
+      <span class="actions message-actions">
+        <span class="tag {{ 'success' if message.local_processed else '' }}">{{ '已处理' if message.local_processed else '未处理' }}</span>
+        <span class="tag {{ 'success' if message.local_starred else '' }}">{{ '已加星' if message.local_starred else '未加星' }}</span>
+        <form method="post" action="/messages/{{ message.id }}/toggle-processed"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '取消处理' if message.local_processed else '标记处理' }}</button></form>
+        <form method="post" action="/messages/{{ message.id }}/toggle-starred"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '取消星标' if message.local_starred else '加星' }}</button></form>
+        <form class="label-form" method="post" action="/messages/{{ message.id }}/labels"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input name="label" placeholder="添加标签" aria-label="添加标签"><button class="link-button" type="submit">添加</button></form>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% if pages > 1 %}
+  <nav class="pagination">
+    {% if page > 1 %}<a class="button" href="/messages?page={{ page - 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}">上一页</a>{% endif %}
+    <span class="muted">第 {{ page }} / {{ pages }} 页</span>
+    {% if page < pages %}<a class="button" href="/messages?page={{ page + 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}">下一页</a>{% endif %}
+  </nav>
+  {% endif %}
   {% else %}<p class="empty">没有匹配邮件。</p>{% endif %}
 </section>
 {% endblock %}

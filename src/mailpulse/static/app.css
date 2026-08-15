@@ -87,6 +87,7 @@ nav a {
   transition: color .15s ease, background-color .15s ease;
 }
 nav a:hover { color: var(--accent-dark); background: var(--accent-soft); }
+nav a.active { color: var(--accent-dark); background: var(--accent-soft); font-weight: 600; }
 
 .session-actions { flex: 0 0 auto; }
 .link-button {
@@ -101,6 +102,8 @@ nav a:hover { color: var(--accent-dark); background: var(--accent-soft); }
   transition: color .15s ease, background-color .15s ease;
 }
 .link-button:hover { color: var(--accent-dark); background: var(--accent-soft); }
+.link-button.danger { color: var(--danger); }
+.link-button.danger:hover { color: var(--danger); background: var(--danger-soft); }
 
 .container {
   width: min(1120px, 90vw);
@@ -370,6 +373,52 @@ button:disabled,
 .tag.failed { color: var(--danger); background: var(--danger-soft); }
 .tag.pending,
 .tag.running { color: var(--warning); background: var(--warning-soft); }
+
+.filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.filter-tabs a {
+  padding: 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  transition: color .15s ease, background-color .15s ease, border-color .15s ease;
+}
+.filter-tabs a:hover { color: var(--accent-dark); border-color: var(--accent); }
+.filter-tabs a.active { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding-top: 16px;
+}
+.pagination .button { min-height: 36px; padding: 7px 13px; }
+
+.label-row { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 0; }
+.label-tag { display: inline-flex; align-items: center; gap: 4px; }
+.inline-form { display: inline-flex; }
+.label-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.label-remove:hover { color: var(--danger); background: var(--danger-soft); }
 
 .empty { padding: 18px 0; color: var(--muted); }
 .alert,
