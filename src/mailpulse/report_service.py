@@ -15,7 +15,7 @@ from .ai.types import ModelCapabilities, ModelProfile
 from .attachments.converter import MarkItDownAttachmentConverter
 from .config import Settings, get_settings
 from .mail.types import RawMessage
-from .models import Attachment, AuditLog, CanonicalMessage, Mailbox, Report, RuleSet, User
+from .models import Attachment, AuditLog, CanonicalMessage, Mailbox, Report, RuleSet, Task, User
 from .reports import render_summary_markdown
 from .rules import RuleService
 
@@ -28,14 +28,14 @@ class ReportService:
     def generate_for_user(
         self,
         user: User,
+        task: Task,
         use_demo_provider: bool = False,
-        rule_set_id: int | None = None,
-        mailbox_id: int | None = None,
         period_start: datetime | None = None,
         period_end: datetime | None = None,
-        schedule_id: int | None = None,
         run_key: str | None = None,
     ) -> Report:
+        if task.user_id != user.id:
+            raise ValueError("任务不存在或不属于当前用户")
         period_end = period_end or datetime.now(UTC)
         if run_key is not None:
             existing = self.session.scalar(
@@ -43,6 +43,11 @@ class ReportService:
             )
             if existing is not None:
                 return existing
+        mailbox = self.session.scalar(
+            select(Mailbox).where(Mailbox.id == task.mailbox_id, Mailbox.user_id == user.id)
+        )
+        if mailbox is None:
+            raise ValueError("指定邮箱不存在或不属于当前用户")
         query = select(CanonicalMessage).where(CanonicalMessage.owner_user_id == user.id)
         if period_start is not None:
             query = query.where(
@@ -56,28 +61,16 @@ class ReportService:
                 )
             )
         )
-        rule_set = None
-        if rule_set_id is not None:
-            rule_set = self.session.scalar(
-                select(RuleSet).where(RuleSet.id == rule_set_id, RuleSet.user_id == user.id)
-            )
-            if rule_set is None:
-                raise ValueError("指定的规则集不存在或不属于当前用户")
-        else:
-            rule_set = self.session.scalar(
+        rule_sets = list(
+            self.session.scalars(
                 select(RuleSet)
-                .where(RuleSet.user_id == user.id, RuleSet.is_enabled.is_(True))
-                .order_by(RuleSet.priority.asc())
+                .where(RuleSet.task_id == task.id)
+                .order_by(RuleSet.priority.asc(), RuleSet.id.asc())
             )
-        messages = RuleService(self.session).filter_messages(all_messages, rule_set)
+        )
+        messages = RuleService(self.session).filter_messages_any(all_messages, rule_sets)
         if not messages:
             raise ValueError("当前时间范围内没有符合规则的邮件")
-        mailbox_query = select(Mailbox).where(Mailbox.user_id == user.id)
-        if mailbox_id is not None:
-            mailbox_query = mailbox_query.where(Mailbox.id == mailbox_id)
-        mailbox = self.session.scalar(mailbox_query)
-        if mailbox is None:
-            raise ValueError("指定邮箱不存在或不属于当前用户")
 
         converted = []
         converter = MarkItDownAttachmentConverter(self.settings)
@@ -122,7 +115,7 @@ class ReportService:
         report = Report(
             user_id=user.id,
             mailbox_id=mailbox.id,
-            schedule_id=schedule_id,
+            task_id=task.id,
             run_key=run_key or f"manual:{user.id}:{uuid4().hex}",
             period_start=start,
             period_end=end,

@@ -1,0 +1,23 @@
+{# 规则编辑行：用于向导与详情页。期望变量：rule（{name, conditions:[{field,operator,value}]} 或 None）、rule_field_labels、rule_operator_labels #}
+{% set conditions = rule.conditions if rule and rule.conditions else [{'field': 'subject', 'operator': 'contains', 'value': ''}] %}
+<div class="rule-row" data-rule-row>
+  <div class="rule-row-head">
+    <input class="rule-name" placeholder="规则名称，如：项目相关邮件" value="{{ rule.name if rule and rule.name else '' }}">
+    <button type="button" class="link-button danger" data-remove-rule title="删除规则">删除规则</button>
+  </div>
+  <div class="rule-conditions" data-conditions>
+    {% for condition in conditions %}
+    <div class="condition-row">
+      <select class="condition-field" aria-label="字段">
+        {% for field, label in rule_field_labels.items() %}<option value="{{ field }}" {% if condition.field == field %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <select class="condition-op" aria-label="操作符">
+        {% for op, label in rule_operator_labels.items() %}<option value="{{ op }}" {% if condition.operator == op %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <input class="condition-value" placeholder="匹配内容" value="{{ condition.value }}">
+      <button type="button" class="link-button danger condition-remove" title="删除条件">×</button>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" class="link-button" data-add-condition>+ 添加条件（条件之间为「且」关系）</button>
+</div>

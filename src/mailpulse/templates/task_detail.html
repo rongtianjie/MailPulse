@@ -1,0 +1,220 @@
+{% extends "user_base.html" %}
+{% block title %}{{ task.name }} - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">任务详情</p><h1>{{ task.name }}</h1>
+    <p class="muted">{{ mailbox.email_address if mailbox else '未配置邮箱' }} · {{ '定时运行 ' ~ task.cron_expression ~ '（' ~ task.timezone ~ '）' if task.run_mode == 'scheduled' else '手动运行' }}</p>
+  </div>
+  <span class="actions">
+    <span class="tag {{ 'success' if task.is_enabled else 'muted' }}">{{ '启用' if task.is_enabled else '停用' }}</span>
+    <form method="post" action="/tasks/{{ task.id }}/run" data-disable-on-submit>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="primary" type="submit" data-processing-label="运行中…">立即运行</button>
+    </form>
+    <form method="post" action="/tasks/{{ task.id }}/toggle">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="secondary" type="submit">{{ '停用' if task.is_enabled else '启用' }}</button>
+    </form>
+    <form method="post" action="/tasks/{{ task.id }}/delete" data-disable-on-submit>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="danger" type="submit" data-processing-label="删除中…" onclick="return confirm('确定删除任务「{{ task.name }}」？其筛选规则和投递渠道将一并删除。')">删除任务</button>
+    </form>
+  </span>
+</div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert success">{{ notice }}</div>{% endif %}
+
+<section class="card" id="basic">
+  <div class="section-heading"><h2>基本信息</h2></div>
+  <form method="post" action="/tasks/{{ task.id }}/basic" class="form-grid" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>任务名称<input name="name" value="{{ form.name }}" required></label>
+    <label>执行方式<select name="run_mode">
+      <option value="manual" {% if form.run_mode == 'manual' %}selected{% endif %}>手动运行</option>
+      <option value="scheduled" {% if form.run_mode == 'scheduled' %}selected{% endif %}>定时运行</option>
+    </select></label>
+    <label>计划类型<select name="schedule_type">
+      <option value="daily" {% if form.schedule_type == 'daily' %}selected{% endif %}>每日</option>
+      <option value="weekly" {% if form.schedule_type == 'weekly' %}selected{% endif %}>每周</option>
+      <option value="custom" {% if form.schedule_type == 'custom' %}selected{% endif %}>自定义 cron</option>
+    </select></label>
+    <label>执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
+    <label>每周范围<select name="weekdays">
+      <option value="mon-fri" {% if form.weekdays == 'mon-fri' %}selected{% endif %}>周一至周五</option>
+      <option value="mon-sun" {% if form.weekdays == 'mon-sun' %}selected{% endif %}>每天</option>
+      <option value="sat,sun" {% if form.weekdays == 'sat,sun' %}selected{% endif %}>周末</option>
+      <option value="mon,wed,fri" {% if form.weekdays == 'mon,wed,fri' %}selected{% endif %}>周一、三、五</option>
+    </select></label>
+    <label>自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
+    <label>时区<input name="timezone" value="{{ form.timezone }}" required></label>
+    <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="{{ form.lookback_hours }}" required></label>
+    <label class="check"><input type="checkbox" name="is_enabled" {% if form.is_enabled %}checked{% endif %}> 启用该任务</label>
+    <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">保存基本信息</button></div>
+  </form>
+</section>
+
+<section class="card" id="mailbox">
+  <div class="section-heading">
+    <h2>收件邮箱</h2>
+    <span class="actions">
+      {% if mailbox and mailbox.last_synced_at %}<span class="tag success">上次同步 {{ mailbox.last_synced_at | fmt_time }}</span>{% endif %}
+      {% if mailbox and mailbox.sync_error %}<span class="tag failed" title="{{ mailbox.sync_error }}">同步异常</span>{% endif %}
+      <form method="post" action="/tasks/{{ task.id }}/sync" data-disable-on-submit>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="secondary" type="submit" data-processing-label="同步中…">立即同步</button>
+      </form>
+    </span>
+  </div>
+  {% if mailbox and mailbox.sync_error %}<div class="alert error">{{ mailbox.sync_error }}</div>{% endif %}
+  {% if tested %}<div class="alert success">IMAP 连接验证成功。</div>{% endif %}
+  {% if tested_smtp %}<div class="alert success">SMTP 连接验证成功。</div>{% endif %}
+  <form method="post" action="/tasks/{{ task.id }}/mailbox" class="form-grid" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>邮箱名称<input name="mailbox_name" value="{{ mailbox_form.name }}"></label>
+    <label>邮箱地址<input type="email" name="email_address" value="{{ mailbox_form.email_address }}" required></label>
+    <label>IMAP 主机<input name="imap_host" value="{{ mailbox_form.imap_host }}" required></label>
+    <label>IMAP 端口<input type="number" name="imap_port" value="{{ mailbox_form.imap_port }}" required></label>
+    <label>登录用户名<input name="username" value="{{ mailbox_form.username }}" required></label>
+    <label>邮箱密码<input type="password" name="password" placeholder="留空表示不修改"></label>
+    <label>同步文件夹<input name="folder" value="{{ mailbox_form.folder }}"></label>
+    <details class="smtp-optional">
+      <summary>SMTP 发件配置（可选）</summary>
+      <p class="muted compact">如需通过邮件接收归纳报告（投递渠道、测试邮件、手动发送），请配置 SMTP 发件信息。</p>
+      <div class="form-grid">
+        <label>SMTP 主机<input name="smtp_host" value="{{ mailbox_form.smtp_host }}"></label>
+        <label>SMTP 端口<input type="number" name="smtp_port" value="{{ mailbox_form.smtp_port }}"></label>
+      </div>
+    </details>
+    <div class="form-actions">
+      <button class="primary" type="submit" data-processing-label="保存中…">保存邮箱配置</button>
+      <button class="secondary" formaction="/tasks/{{ task.id }}/mailbox/test" formmethod="post" type="submit" data-processing-label="验证中…">验证 IMAP 连接</button>
+      <button class="secondary" formaction="/tasks/{{ task.id }}/mailbox/test-smtp" formmethod="post" type="submit" data-processing-label="验证中…">验证 SMTP 连接</button>
+    </div>
+  </form>
+  <p class="muted compact">邮箱默认以 IMAP 只读方式同步，不会修改服务器端状态。密码加密保存，不会显示在页面或日志中。</p>
+</section>
+
+<section class="card" id="rules">
+  <div class="section-heading">
+    <h2>筛选规则</h2>
+    <span class="muted">满足任一启用规则的邮件进入报告；不配置则处理全部邮件</span>
+  </div>
+  {% if rule_views %}
+  <div class="list rule-list-view">
+    {% for view in rule_views %}
+    <div class="list-item">
+      <span>
+        <strong>{{ loop.index }}. {{ view.rule.name }}</strong>
+        <small>{{ view.summary }} · {{ '启用' if view.rule.is_enabled else '停用' }}</small>
+      </span>
+      <span class="actions">
+        <form method="post" action="/tasks/{{ task.id }}/rules/{{ view.rule.id }}/move"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="direction" value="up"><button class="link-button" type="submit" {% if view.first %}disabled{% endif %} title="上移">↑</button></form>
+        <form method="post" action="/tasks/{{ task.id }}/rules/{{ view.rule.id }}/move"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="direction" value="down"><button class="link-button" type="submit" {% if view.last %}disabled{% endif %} title="下移">↓</button></form>
+        <a class="link-button" href="/tasks/{{ task.id }}/rules/{{ view.rule.id }}/edit">编辑</a>
+        <form method="post" action="/tasks/{{ task.id }}/rules/{{ view.rule.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if view.rule.is_enabled else '启用' }}</button></form>
+        <form method="post" action="/tasks/{{ task.id }}/rules/{{ view.rule.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">暂无规则，任务将处理该邮箱同步的全部邮件。</p>{% endif %}
+
+  <form method="post" action="{{ '/tasks/' ~ task.id ~ '/rules/' ~ editing_rule.id ~ '/edit' if editing_rule else '/tasks/' ~ task.id ~ '/rules' }}" class="stack rule-form" data-disable-on-submit data-rule-editor>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="rules_json" id="rules-json" value="[]">
+    <input type="hidden" name="mode" value="{{ rule_form.mode }}" data-rule-mode>
+    {% if editing_rule %}
+    <p class="muted">正在编辑规则「{{ editing_rule.name }}」。<a class="link-button" href="/tasks/{{ task.id }}">取消编辑</a></p>
+    {% endif %}
+    <div class="form-grid">
+      <label>规则名称<input name="name" value="{{ rule_form.name or '' }}" placeholder="如：项目相关邮件" required></label>
+      <label>优先级（数字越小越优先）<input type="number" name="priority" value="{{ rule_form.priority if rule_form.priority is not none else 100 }}"></label>
+    </div>
+    <div class="editor-tabs">
+      <button type="button" class="editor-tab {{ 'active' if rule_form.mode == 'form' else '' }}" data-editor-tab="form">简单条件</button>
+      <button type="button" class="editor-tab {{ 'active' if rule_form.mode == 'json' else '' }}" data-editor-tab="json">JSON 高级</button>
+    </div>
+    <div class="editor-pane {{ 'active' if rule_form.mode == 'form' else '' }}" data-editor-pane="form">
+      <div class="rule-list" data-rule-list>
+        {% with rule = {'name': rule_form.name, 'conditions': rule_form.conditions} %}
+        {% include "partials/rule_form_row.html" %}
+        {% endwith %}
+      </div>
+      <p class="muted compact">条件之间为「且」关系；多个规则之间为「或」关系（满足任一启用规则即纳入报告）。</p>
+    </div>
+    <div class="editor-pane {{ 'active' if rule_form.mode == 'json' else '' }}" data-editor-pane="json">
+      <label>DSL JSON
+        <textarea name="definition" rows="12" class="rule-definition">{{ rule_form.definition or rule_default_definition }}</textarea>
+      </label>
+      <p class="muted compact">可用字段：<code>subject</code> <code>sender</code> <code>recipients</code> <code>cc</code> <code>body_text</code> <code>received_at</code> <code>local_labels</code> <code>local_starred</code> <code>local_processed</code> <code>attachment_name</code> <code>attachment_type</code> <code>attachment_size</code>；操作符：<code>equals</code> <code>contains</code> <code>not_contains</code> <code>starts_with</code> <code>ends_with</code> <code>regex</code> <code>greater_than</code> <code>less_than</code> <code>in</code> <code>exists</code>。</p>
+    </div>
+    <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">{{ '保存规则' if editing_rule else '添加规则' }}</button></div>
+  </form>
+</section>
+
+<section class="card" id="channels">
+  <div class="section-heading"><h2>投递渠道</h2><span class="muted">报告生成后按启用渠道投递</span></div>
+  <div class="list">
+    <div class="list-item">
+      <span><strong>网页内直接查看</strong><small>报告始终保存，可在「报告」页面查看</small></span>
+      <span class="tag success">始终开启</span>
+    </div>
+    {% for target in targets %}
+    <div class="list-item">
+      <span>
+        <strong>{{ target.destination }}</strong>
+        <small>SMTP 邮件投递{% if not target.is_enabled %} · 已停用{% endif %}</small>
+      </span>
+      <span class="actions">
+        <span class="tag {{ 'success' if target.is_enabled else 'muted' }}">{{ '启用' if target.is_enabled else '停用' }}</span>
+        <form method="post" action="/tasks/{{ task.id }}/targets/{{ target.id }}/test" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="发送中…">发送测试邮件</button></form>
+        <details class="target-edit"><summary class="link-button">编辑</summary>
+          <form method="post" action="/tasks/{{ task.id }}/targets/{{ target.id }}/edit" class="target-edit-form" data-disable-on-submit>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="email" name="destination" value="{{ target.destination }}" required>
+            <button class="secondary" type="submit" data-processing-label="保存中…">保存</button>
+          </form>
+        </details>
+        <form method="post" action="/tasks/{{ task.id }}/targets/{{ target.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">{{ '停用' if target.is_enabled else '启用' }}</button></form>
+        <form method="post" action="/tasks/{{ task.id }}/targets/{{ target.id }}/delete" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button danger" type="submit" data-processing-label="删除中…">删除</button></form>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% if not targets %}<p class="empty">尚未配置邮件投递地址，报告仅通过网页查看。</p>{% endif %}
+  <form method="post" action="/tasks/{{ task.id }}/targets" class="actions" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="inline-field">新增投递邮箱地址<input type="email" name="destination" placeholder="如 boss@example.com"></label>
+    <button class="primary" type="submit" data-processing-label="添加中…">添加地址</button>
+  </form>
+  {% if not mailbox or not mailbox.smtp_host %}<p class="muted compact">注意：发送邮件（含测试邮件）需要先在「收件邮箱」区块配置 SMTP 发件信息。</p>{% endif %}
+</section>
+
+<section class="card" id="runs">
+  <div class="section-heading"><h2>运行记录</h2></div>
+  {% if jobs %}
+  <div class="list">
+    {% for job in jobs %}
+    <div class="list-item">
+      <span><strong class="tag {{ 'success' if job.status == 'success' else ('failed' if job.status == 'failed' else ('running' if job.status == 'running' else 'pending')) }}">{{ job.status }}</strong><small>阶段 {{ job.stage }} · {{ job.started_at | fmt_time }}{% if job.finished_at %} 至 {{ job.finished_at | fmt_time }}{% endif %}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span>
+      <span class="muted">{{ '定时' if job.run_key.startswith('schedule:') else '手动' }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">暂无运行记录。点击页面顶部「立即运行」开始。</p>{% endif %}
+</section>
+
+<section class="card" id="reports">
+  <div class="section-heading"><h2>历史报告</h2><a class="link-button" href="/reports?task_id={{ task.id }}">查看全部</a></div>
+  {% if reports %}
+  <div class="list">
+    {% for report in reports %}
+    <a class="list-item" href="/reports/{{ report.id }}">
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
+      <span class="muted">{{ report.created_at | fmt_time }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">暂无报告。</p>{% endif %}
+</section>
+{% endblock %}

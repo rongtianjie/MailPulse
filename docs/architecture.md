@@ -40,11 +40,11 @@ Worker ────────┘
 
 ## 4. 权限与数据范围
 
-应用使用本地账号和 Session 认证。账号以用户名（`users.username`，全局唯一、大小写不敏感）作为登录标识，账号不绑定邮箱。收件邮箱（IMAP 账户）与报告投递邮箱分离：任务通过 `mailboxes` 关联收件邮箱，报告投递目标由 `schedule_delivery_targets` 表按任务配置（每个任务可配置多个投递目标，支持后续扩展多种投递方式）。管理员和普通用户使用不同的网页布局与路由组：
+应用使用本地账号和 Session 认证。账号以用户名（`users.username`，全局唯一、大小写不敏感）作为登录标识，账号不绑定邮箱。收件邮箱（IMAP 账户）与报告投递邮箱分离：任务通过 `mailboxes` 关联收件邮箱，报告投递目标由 `task_delivery_targets` 表按任务配置（网页查看渠道始终开启，SMTP 渠道支持每个任务配置多个收件人，未来可扩展更多投递方式）。管理员和普通用户使用不同的网页布局与路由组：
 
 - 登录入口：`/login`；健康检查：`/healthz`。
 - 管理员路由：`/admin`、`/admin/users`、`/admin/models`、`/admin/jobs`、`/admin/account/password`。
-- 普通用户路由：`/`、`/settings`、`/messages`、`/rules`、`/schedules` 和 `/reports`。
+- 普通用户路由：`/`、`/tasks`（含 `/tasks/new` 与 `/tasks/{id}` 详情）、`/messages`、`/reports` 和 `/account`。
 
 未登录或 Session 中的账号无效时，受保护页面返回 `303` 并跳转到 `/login`。登录后，管理员进入 `/admin`，普通用户进入 `/`；使用默认管理员首次登录时先进入账号密码设置页，该步骤可以跳过。
 

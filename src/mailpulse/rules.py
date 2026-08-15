@@ -53,3 +53,26 @@ class RuleService:
             for message in messages
             if self.evaluator.evaluate(definition, message_rule_data(self.session, message))
         ]
+
+    def filter_messages_any(
+        self,
+        messages: Iterable[CanonicalMessage],
+        rule_sets: Iterable[RuleSet],
+    ) -> list[CanonicalMessage]:
+        """Keep messages matched by any enabled rule set (OR union).
+
+        A message is included when at least one enabled rule set matches it;
+        duplicates are removed while preserving the input order. With no
+        enabled rule sets every message is kept.
+        """
+        enabled = [item for item in rule_sets if item is not None and item.is_enabled]
+        if not enabled:
+            return list(messages)
+        result: list[CanonicalMessage] = []
+        seen: set[int] = set()
+        for rule_set in enabled:
+            for message in self.filter_messages(messages, rule_set):
+                if message.id not in seen:
+                    seen.add(message.id)
+                    result.append(message)
+        return result

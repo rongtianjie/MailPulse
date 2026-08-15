@@ -1,0 +1,43 @@
+{% extends "user_base.html" %}
+{% block title %}任务 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">配置中心</p><h1>任务</h1><p class="muted">每个任务包含一个收件邮箱、一系列筛选规则和若干报告投递渠道。</p></div>
+  <a class="button primary" href="/tasks/new">+ 新建任务</a>
+</div>
+{% if cards %}
+<section class="task-list">
+  {% for card in cards %}
+  <a class="task-card task-card-row" href="/tasks/{{ card.task.id }}">
+    <div class="task-card-main">
+      <div class="task-card-head">
+        <strong>{{ card.task.name }}</strong>
+        <span class="tag {{ 'success' if card.task.is_enabled else 'muted' }}">{{ '启用' if card.task.is_enabled else '停用' }}</span>
+        <span class="tag {{ 'success' if card.status == 'success' else ('failed' if card.status == 'failed' else ('running' if card.status == 'running' else 'pending')) }}">{{ '运行成功' if card.status == 'success' else ('运行失败' if card.status == 'failed' else ('运行中' if card.status == 'running' else '尚未运行')) }}</span>
+      </div>
+      <p class="muted">{{ card.mailbox.email_address if card.mailbox else '未配置邮箱' }}{% if card.task.run_mode == 'scheduled' %} · {{ card.task.cron_expression }}（{{ card.task.timezone }}）{% else %} · 手动运行{% endif %}{% if card.enabled_targets %} · 邮件投递 {{ card.enabled_targets|length }} 个收件人{% else %} · 仅网页查看{% endif %}</p>
+    </div>
+    <div class="task-card-side">
+      <small class="muted">
+        {% if card.status == 'success' and card.finished_at %}上次成功：{{ card.finished_at | fmt_time }}
+        {% elif card.status == 'failed' and card.finished_at %}上次失败：{{ card.finished_at | fmt_time }}
+        {% else %}尚未运行{% endif %}
+      </small>
+      {% if card.task.run_mode == 'scheduled' %}<small class="muted">下次运行：{{ card.next_run | fmt_time or '—' }}</small>{% endif %}
+      <span class="link-button">进入配置 ›</span>
+    </div>
+  </a>
+  {% endfor %}
+</section>
+{% else %}
+<section class="card empty-card">
+  <p class="empty">还没有任务。点击右上角「新建任务」，按四个步骤完成首个任务配置。</p>
+  <div class="actions">
+    <form method="post" action="/demo/seed" data-disable-on-submit>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="secondary" type="submit" data-processing-label="写入中…">写入演示数据</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

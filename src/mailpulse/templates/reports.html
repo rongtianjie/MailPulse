@@ -1,10 +1,24 @@
 {% extends "user_base.html" %}
 {% block title %}报告 - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">归纳结果</p><h1>报告</h1></div><form method="post" action="/reports/generate" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" data-processing-label="生成中…">生成报告</button></form></div>
+<div class="page-heading"><div><p class="eyebrow">归纳结果</p><h1>报告</h1><p class="muted">报告始终保存在网页端（网页查看渠道），也可通过任务配置的邮件渠道发送。</p></div></div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 <section class="card">
-  {% if reports %}<div class="list">{% for report in reports %}<a class="list-item" href="/reports/{{ report.id }}"><div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div><span class="muted">{{ report.created_at | fmt_time }}</span></a>{% endfor %}</div>
-  {% else %}<p class="empty">暂无报告。</p>{% endif %}
+  {% if tasks %}
+  <form method="get" action="/reports" class="mailbox-filter">
+    <select name="task_id" onchange="this.form.submit()">
+      <option value="">全部任务</option>
+      {% for task in tasks %}<option value="{{ task.id }}" {% if task_id == task.id %}selected{% endif %}>{{ task.name }}</option>{% endfor %}
+    </select>
+  </form>
+  {% endif %}
+  {% if reports %}<div class="list">
+    {% for report in reports %}
+    <a class="list-item" href="/reports/{{ report.id }}">
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}{% if report.task %} · 任务：{{ report.task.name }}{% endif %}</small></div>
+      <span class="muted">{{ report.created_at | fmt_time }}</span>
+    </a>
+    {% endfor %}
+  </div>{% else %}<p class="empty">暂无报告。运行任意任务后将在这里看到结果。</p>{% endif %}
 </section>
 {% endblock %}

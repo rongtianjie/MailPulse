@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 import sys
 from datetime import UTC, datetime, timedelta
@@ -32,7 +33,7 @@ from mailpulse.auth import authenticate, create_user
 from mailpulse.config import Settings, get_settings
 from mailpulse.db import bootstrap_database, build_session_factory, init_database, reset_database
 from mailpulse.delivery import ReportDeliveryService
-from mailpulse.demo import seed_demo
+from mailpulse.demo import demo_messages, seed_demo
 from mailpulse.filtering import RuleEvaluator, RuleValidationError
 from mailpulse.mail.connectors import FakeMailConnector, IMAPConnector
 from mailpulse.mail.sync import MailSyncService
@@ -43,21 +44,22 @@ from mailpulse.models import (
     AuditLog,
     CanonicalMessage,
     Delivery,
-    JobRun,
     Mailbox,
     MessageOccurrence,
     ModelBinding,
     Report,
-    Schedule,
-    ScheduleDeliveryTarget,
+    RuleSet,
+    Task,
+    TaskDeliveryTarget,
     User,
 )
 from mailpulse.report_service import ReportService
 from mailpulse.reports import render_summary_markdown
+from mailpulse.rules import RuleService
 from mailpulse.search import SearchService
 from mailpulse.security import decrypt_secret, encrypt_secret, verify_password
 from mailpulse.web.rate_limit import LoginRateLimiter
-from mailpulse.worker import _due_fire_time, _run_schedule, build_cron_expression
+from mailpulse.worker import _due_fire_time, build_cron_expression, run_task_now
 
 
 def make_settings(tmp_path) -> Settings:
@@ -644,7 +646,10 @@ def test_demo_sync_to_report_records_markdown_status_and_audit(tmp_path):
     try:
         user = create_user(db, "report", "password-123")
         seed_demo(db, user, settings.data_dir)
-        report = ReportService(db, settings).generate_for_user(user, use_demo_provider=True)
+        task = db.query(Task).filter(Task.user_id == user.id).one()
+        report = ReportService(db, settings).generate_for_user(
+            user, task=task, use_demo_provider=True
+        )
         db.commit()
         assert report.status == "success"
         assert "附件处理状态" in report.rendered_markdown
@@ -884,20 +889,24 @@ def test_model_profile_global_binding_is_resolved(tmp_path):
         db.close()
 
 
-def test_schedule_due_time_and_cron_presets():
-    schedule = Schedule(
+def test_task_due_time_and_cron_presets():
+    task = Task(
         timezone="Asia/Shanghai",
         cron_expression="0 9 * * *",
         lookback_hours=24,
+        run_mode="scheduled",
     )
     before = datetime(2026, 8, 15, 0, 30, tzinfo=UTC)
     after = datetime(2026, 8, 15, 1, 30, tzinfo=UTC)
-    assert _due_fire_time(schedule, before) is None
-    fire = _due_fire_time(schedule, after)
+    assert _due_fire_time(task, before) is None
+    fire = _due_fire_time(task, after)
     assert fire is not None
     assert fire.hour == 9 and fire.utcoffset() == timedelta(hours=8)
-    schedule.last_run_at = fire.astimezone(UTC)
-    assert _due_fire_time(schedule, after) is None
+    task.last_run_at = fire.astimezone(UTC)
+    assert _due_fire_time(task, after) is None
+    # 手动任务不会按计划触发
+    manual = Task(run_mode="manual", cron_expression="0 9 * * *", timezone="UTC")
+    assert _due_fire_time(manual, after) is None
     assert build_cron_expression("weekly", "08:30", "mon,wed,fri") == "30 8 * * mon,wed,fri"
     assert build_cron_expression("custom", "09:00", custom_cron="5 10 * * 1-5") == "5 10 * * 1-5"
 
@@ -920,15 +929,16 @@ def test_worker_persists_safe_failure_state(tmp_path, monkeypatch):
         db.add(mailbox)
         db.flush()
         now = datetime.now(UTC)
-        schedule = Schedule(
+        task = Task(
             user_id=user.id,
             mailbox_id=mailbox.id,
             cron_expression="0 9 * * *",
             timezone="UTC",
             lookback_hours=24,
+            run_mode="scheduled",
             last_run_at=now - timedelta(days=1),
         )
-        db.add(schedule)
+        db.add(task)
         db.flush()
         db.commit()
 
@@ -940,8 +950,7 @@ def test_worker_persists_safe_failure_state(tmp_path, monkeypatch):
                 raise ConnectionError("fake mailbox failure")
 
         monkeypatch.setattr(worker_module, "IMAPConnector", FailingConnector)
-        assert _run_schedule(db, schedule, now, now, settings) is False
-        job = db.query(JobRun).one()
+        job = run_task_now(db, task, settings, "schedule:1:test", now)
         assert job.status == "failed"
         assert job.stage == "sync"
         assert "worker-secret" not in (job.error_message or "")
@@ -967,26 +976,27 @@ def test_deliver_to_targets_sends_to_enabled_targets_only(tmp_path):
         )
         db.add(mailbox)
         db.flush()
-        schedule = Schedule(
+        task = Task(
             user_id=user.id,
             mailbox_id=mailbox.id,
             cron_expression="0 9 * * *",
             timezone="UTC",
+            run_mode="scheduled",
         )
-        db.add(schedule)
+        db.add(task)
         db.flush()
-        enabled = ScheduleDeliveryTarget(
-            schedule_id=schedule.id, destination="boss@example.com"
+        enabled = TaskDeliveryTarget(
+            task_id=task.id, destination="boss@example.com"
         )
-        disabled = ScheduleDeliveryTarget(
-            schedule_id=schedule.id, destination="archive@example.com", is_enabled=False
+        disabled = TaskDeliveryTarget(
+            task_id=task.id, destination="archive@example.com", is_enabled=False
         )
         db.add_all([enabled, disabled])
         db.flush()
         report = Report(
             user_id=user.id,
             mailbox_id=mailbox.id,
-            schedule_id=schedule.id,
+            task_id=task.id,
             run_key="manual:deliver-to-targets",
             period_start=datetime.now(UTC) - timedelta(hours=1),
             period_end=datetime.now(UTC),
@@ -1017,24 +1027,25 @@ def test_deliver_to_targets_sends_to_enabled_targets_only(tmp_path):
                 return delivery
 
         service = FakeDeliveryService(db)
-        _deliver_to_targets(db, service, report, schedule, mailbox)
+        _deliver_to_targets(db, service, report, task, mailbox)
         assert service.sent == ["boss@example.com"]
         assert db.query(Delivery).count() == 1
         # 已发送的目标不会重复投递
-        _deliver_to_targets(db, service, report, schedule, mailbox)
+        _deliver_to_targets(db, service, report, task, mailbox)
         assert service.sent == ["boss@example.com"]
         assert db.query(Delivery).count() == 1
 
-        # 未配置任何启用目标时报错
+        # 全部目标停用（仅网页渠道）时不投递任何邮件，也不报错
         enabled.is_enabled = False
         db.commit()
-        with pytest.raises(RuntimeError, match="未配置报告投递目标"):
-            _deliver_to_targets(db, service, report, schedule, mailbox)
+        _deliver_to_targets(db, service, report, task, mailbox)
+        assert service.sent == ["boss@example.com"]
+        assert db.query(Delivery).count() == 1
     finally:
         db.close()
 
 
-def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
+def test_task_delivery_target_web_crud(tmp_path, monkeypatch):
     monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MAILPULSE_SECRET_KEY", "target-crud-test-secret")
     get_settings.cache_clear()
@@ -1065,16 +1076,14 @@ def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
         "/login",
         data={"username": "tester", "password": "password-123", "csrf_token": token},
     )
-    schedules_page = client.get("/schedules")
-    token = re.search(r'name="csrf_token" value="([^"]+)"', schedules_page.text).group(1)
+    tasks_page = client.get("/tasks/new")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', tasks_page.text).group(1)
     created = client.post(
-        "/schedules",
+        "/tasks",
         data={
             "name": "日报",
-            "mailbox_id": str(mailbox.id),
-            "schedule_type": "daily",
-            "scheduled_time": "09:00",
-            "weekdays": "mon-fri",
+            "run_mode": "manual",
+            "copy_from": str(mailbox.id),
             "timezone": "Asia/Shanghai",
             "lookback_hours": "24",
             "is_enabled": "on",
@@ -1083,13 +1092,15 @@ def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
         follow_redirects=False,
     )
     assert created.status_code == 303
-    edit_path = created.headers["location"]
-    assert edit_path.startswith("/schedules/")
-    schedule_id = int(edit_path.split("/")[2])
-    targets_path = f"/schedules/{schedule_id}/targets"
-    edit_page = client.get(edit_path)
-    assert "报告投递目标" in edit_page.text
-    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+    detail_path = created.headers["location"]
+    assert detail_path.startswith("/tasks/")
+    task_id = int(detail_path.split("/")[2])
+    targets_path = f"/tasks/{task_id}/targets"
+    detail_page = client.get(detail_path)
+    assert "投递渠道" in detail_page.text
+    assert "网页查看" in detail_page.text
+    assert "始终开启" in detail_page.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail_page.text).group(1)
 
     added = client.post(
         targets_path,
@@ -1110,15 +1121,15 @@ def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
 
     db = build_session_factory(settings)()
     try:
-        target = db.query(ScheduleDeliveryTarget).one()
+        target = db.query(TaskDeliveryTarget).one()
         assert target.destination == "boss@example.com"
         assert target.channel == "smtp"
         assert target.is_enabled is True
-        schedule_id = target.schedule_id
+        task_id = target.task_id
         report = Report(
             user_id=user.id,
             mailbox_id=mailbox.id,
-            schedule_id=schedule_id,
+            task_id=task_id,
             run_key="manual:target-report",
             period_start=datetime.now(UTC) - timedelta(hours=1),
             period_end=datetime.now(UTC),
@@ -1136,8 +1147,8 @@ def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
     assert 'value="boss@example.com"' in detail_page.text
 
     # 停用与删除投递目标
-    edit_page = client.get(edit_path)
-    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+    detail_page = client.get(detail_path)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail_page.text).group(1)
     toggled = client.post(
         f"{targets_path}/1/toggle",
         data={"csrf_token": token},
@@ -1146,11 +1157,11 @@ def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
     assert toggled.status_code == 303
     db = build_session_factory(settings)()
     try:
-        assert db.get(ScheduleDeliveryTarget, 1).is_enabled is False
+        assert db.get(TaskDeliveryTarget, 1).is_enabled is False
     finally:
         db.close()
-    edit_page = client.get(edit_path)
-    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+    detail_page = client.get(detail_path)
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail_page.text).group(1)
     deleted = client.post(
         f"{targets_path}/1/delete",
         data={"csrf_token": token},
@@ -1159,7 +1170,7 @@ def test_schedule_delivery_target_web_crud(tmp_path, monkeypatch):
     assert deleted.status_code == 303
     db = build_session_factory(settings)()
     try:
-        assert db.query(ScheduleDeliveryTarget).count() == 0
+        assert db.query(TaskDeliveryTarget).count() == 0
     finally:
         db.close()
 
@@ -1221,6 +1232,8 @@ def test_report_delivery_records_failure_and_retry(tmp_path):
 
 
 def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
+    import mailpulse.worker as worker_module
+
     monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MAILPULSE_SECRET_KEY", "web-test-secret")
     get_settings.cache_clear()
@@ -1247,13 +1260,13 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     assert "生成报告" not in response.text
     assert admin_client.get("/").status_code == 403
     for user_path in [
-        "/settings",
-        "/schedules",
-        "/rules",
+        "/tasks",
         "/messages",
         "/reports",
     ]:
         assert admin_client.get(user_path).status_code == 403
+    # 账号设置对任何已登录用户开放（含管理员）
+    assert admin_client.get("/account").status_code == 200
     assert admin_client.get("/admin/users").status_code == 200
     assert admin_client.get("/admin/models").status_code == 200
     assert admin_client.get("/admin/jobs").status_code == 200
@@ -1312,20 +1325,28 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         data={"username": user.username, "password": "password-123", "csrf_token": user_token},
     )
     assert user_response.status_code == 200
-    assert "快速开始" in user_response.text
+    assert "任务状态" in user_response.text
     assert 'href="/admin"' not in user_response.text
     for admin_path in ["/admin", "/admin/users", "/admin/models", "/admin/jobs"]:
         assert user_client.get(admin_path).status_code == 403
     dashboard = user_client.get("/")
     token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
     assert user_client.post("/demo/seed", data={"csrf_token": token}).status_code == 200
+    task_db = build_session_factory(settings)()
+    try:
+        task_id = task_db.query(Task).filter(Task.user_id == user.id).one().id
+        mailbox_id = task_db.query(Mailbox).filter(Mailbox.user_id == user.id).one().id
+    finally:
+        task_db.close()
     monkeypatch.setattr("mailpulse.web.routes.IMAPConnector.test_connection", lambda self: None)
-    settings_page = user_client.get("/settings")
-    settings_token = re.search(r'name="csrf_token" value="([^"]+)"', settings_page.text).group(1)
-    tested_settings = user_client.post("/settings/test", data={"csrf_token": settings_token})
-    assert tested_settings.status_code == 200
-    assert "IMAP 连接验证成功" in tested_settings.text
-    assert "测试 IMAP 连接" not in tested_settings.text
+    task_page = user_client.get(f"/tasks/{task_id}")
+    task_token = re.search(r'name="csrf_token" value="([^"]+)"', task_page.text).group(1)
+    tested = user_client.post(
+        f"/tasks/{task_id}/mailbox/test", data={"csrf_token": task_token}
+    )
+    assert tested.status_code == 200
+    assert "IMAP 连接验证成功" in tested.text
+    assert "验证 IMAP 连接" in tested.text
     messages_page = user_client.get("/messages")
     message_db = build_session_factory(settings)()
     message_id = message_db.query(CanonicalMessage).order_by(CanonicalMessage.id).first().id
@@ -1343,36 +1364,71 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         assert verify_message_db.get(CanonicalMessage, message_id).local_processed is True
     finally:
         verify_message_db.close()
+    # 邮件页支持按邮箱筛选，范围为所有任务邮箱同步的邮件
+    filtered = user_client.get(f"/messages?mailbox_id={mailbox_id}")
+    assert filtered.status_code == 200
+    assert "项目周会与本周行动项" in filtered.text
+    assert user_client.get("/messages?mailbox_id=999999").status_code == 200
+
+    # 手动运行任务：同步（空）→ 生成报告（桩）→ 跳转报告详情
+    class StubReportService:
+        def __init__(self, session, settings=None):
+            self.session = session
+
+        def generate_for_user(
+            self, user, task=None, use_demo_provider=False, period_start=None,
+            period_end=None, run_key=None,
+        ):
+            report = Report(
+                user_id=user.id,
+                mailbox_id=task.mailbox_id,
+                task_id=task.id,
+                run_key=run_key,
+                period_start=period_start or datetime.now(UTC) - timedelta(hours=1),
+                period_end=period_end or datetime.now(UTC),
+                status="success",
+                title="演示报告",
+                summary={"message_count": 2},
+                rendered_markdown="演示报告正文",
+                model_trace={"used_vision": False},
+            )
+            self.session.add(report)
+            self.session.flush()
+            return report
+
+    monkeypatch.setattr(worker_module, "IMAPConnector", lambda connection: FakeMailConnector([]))
+    monkeypatch.setattr(worker_module, "ReportService", StubReportService)
     dashboard = user_client.get("/")
     token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
-    report_response = user_client.post(
-        "/reports/generate",
-        data={"use_demo_provider": "true", "csrf_token": token},
+    run_response = user_client.post(
+        f"/tasks/{task_id}/run",
+        data={"csrf_token": token},
+        follow_redirects=False,
     )
-    assert report_response.status_code == 200
+    assert run_response.status_code == 303
+    assert run_response.headers["location"].startswith("/reports/")
+    report_id = int(run_response.headers["location"].split("/")[2])
     reports_page_text = user_client.get("/reports").text
-    assert "生成报告" in reports_page_text
-    assert "生成演示报告" not in reports_page_text
-    report_detail_page = user_client.get("/reports/1")
+    assert "演示报告" in reports_page_text
+    report_detail_page = user_client.get(f"/reports/{report_id}")
     assert report_detail_page.status_code == 200
     assert '"used_vision": false' in report_detail_page.text
-    schedules_page = user_client.get("/schedules")
-    assert schedules_page.status_code == 200
-    token = re.search(r'name="csrf_token" value="([^"]+)"', schedules_page.text).group(1)
-    schedule_db = build_session_factory(settings)()
-    mailbox = schedule_db.query(Mailbox).filter(Mailbox.user_id == user.id).one()
-    schedule_db.close()
+
+    # 创建定时任务：计划字段组合成 cron
+    tasks_page = user_client.get("/tasks/new")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', tasks_page.text).group(1)
     schedule_response = user_client.post(
-        "/schedules",
+        "/tasks",
         data={
             "name": "工作日邮件报告",
-            "mailbox_id": mailbox.id,
+            "run_mode": "scheduled",
             "schedule_type": "weekly",
             "scheduled_time": "09:30",
             "weekdays": "mon-fri",
             "timezone": "Asia/Shanghai",
             "lookback_hours": "24",
             "is_enabled": "on",
+            "copy_from": str(mailbox_id),
             "csrf_token": token,
         },
         follow_redirects=False,
@@ -1380,10 +1436,14 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     assert schedule_response.status_code == 303
     verify_db = build_session_factory(settings)()
     try:
-        saved_schedule = verify_db.query(Schedule).one()
-        assert saved_schedule.cron_expression == "30 9 * * mon-fri"
-        assert saved_schedule.is_enabled is True
-        report_id = verify_db.query(Report).one().id
+        saved_task = (
+            verify_db.query(Task)
+            .filter(Task.user_id == user.id, Task.name == "工作日邮件报告")
+            .one()
+        )
+        assert saved_task.cron_expression == "30 9 * * mon-fri"
+        assert saved_task.run_mode == "scheduled"
+        assert saved_task.is_enabled is True
         other_user = create_user(verify_db, "other", "password-123")
         verify_db.commit()
     finally:
@@ -1789,3 +1849,694 @@ def test_login_remember_password_prefills_and_clears_cookie(tmp_path, monkeypatc
     assert tampered_page.status_code == 200
     assert "登录 MailPulse" in tampered_page.text
     assert 'name="password" value="not-a-valid-token"' not in tampered_page.text
+
+
+def test_task_rules_web_crud(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "rules-crud-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "ruletester", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="inbox@example.com",
+            imap_host="fake",
+            username="ruletester",
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.commit()
+        mailbox_id = mailbox.id
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "ruletester", "password": "password-123", "csrf_token": token},
+    )
+    page = client.get("/tasks/new")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+    created = client.post(
+        "/tasks",
+        data={
+            "name": "规则任务",
+            "run_mode": "manual",
+            "copy_from": str(mailbox_id),
+            "timezone": "Asia/Shanghai",
+            "lookback_hours": "24",
+            "is_enabled": "on",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    task_id = int(created.headers["location"].split("/")[2])
+
+    # 添加合法规则（表单模式：字段/操作符/值）
+    detail = client.get(f"/tasks/{task_id}")
+    assert "暂无规则" in detail.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    rules_json = json.dumps(
+        [
+            {
+                "name": "项目邮件",
+                "conditions": [
+                    {"field": "subject", "operator": "contains", "value": "项目"},
+                ],
+            }
+        ],
+        ensure_ascii=False,
+    )
+    added = client.post(
+        f"/tasks/{task_id}/rules",
+        data={
+            "name": "项目邮件",
+            "mode": "form",
+            "rules_json": rules_json,
+            "priority": "50",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert added.status_code == 303
+    detail = client.get(f"/tasks/{task_id}")
+    assert "项目邮件" in detail.text
+    assert "邮件标题 包含 项目" in detail.text
+
+    # 非法规则被拒绝且保留表单内容（不支持的字段）
+    invalid = client.post(
+        f"/tasks/{task_id}/rules",
+        data={
+            "name": "坏规则",
+            "mode": "form",
+            "rules_json": json.dumps(
+                [
+                    {
+                        "name": "坏规则",
+                        "conditions": [
+                            {"field": "subject", "operator": "explode", "value": "项目"},
+                        ],
+                    }
+                ]
+            ),
+            "priority": "60",
+            "csrf_token": token,
+        },
+    )
+    assert "规则无效" in invalid.text
+
+    # 编辑（表单模式）与停用
+    edit_page = client.get(f"/tasks/{task_id}/rules/1/edit")
+    assert "正在编辑规则「项目邮件」" in edit_page.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', edit_page.text).group(1)
+    updated = client.post(
+        f"/tasks/{task_id}/rules/1/edit",
+        data={
+            "name": "项目邮件 v2",
+            "mode": "json",
+            "definition": '{"kind":"match_all"}',
+            "priority": "10",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert updated.status_code == 303
+    detail = client.get(f"/tasks/{task_id}")
+    assert "项目邮件 v2" in detail.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    toggled = client.post(
+        f"/tasks/{task_id}/rules/1/toggle",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert toggled.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        rule = db.get(RuleSet, 1)
+        assert rule.name == "项目邮件 v2"
+        assert rule.definition == {"kind": "match_all"}
+        assert rule.is_enabled is False
+    finally:
+        db.close()
+
+    # 再添加一条规则并验证上移/下移调整优先级顺序
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    second = client.post(
+        f"/tasks/{task_id}/rules",
+        data={
+            "mode": "form",
+            "rules_json": json.dumps(
+                [
+                    {
+                        "name": "发票邮件",
+                        "conditions": [
+                            {"field": "sender", "operator": "equals",
+                             "value": "finance@example.com"},
+                        ],
+                    }
+                ]
+            ),
+            "priority": "90",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert second.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        rules = (
+            db.query(RuleSet)
+            .filter(RuleSet.task_id == task_id)
+            .order_by(RuleSet.priority.asc(), RuleSet.id.asc())
+            .all()
+        )
+        assert [item.name for item in rules] == ["项目邮件 v2", "发票邮件"]
+        assert rules[1].priority == 90
+    finally:
+        db.close()
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    moved = client.post(
+        f"/tasks/{task_id}/rules/2/move",
+        data={"direction": "up", "csrf_token": token},
+        follow_redirects=False,
+    )
+    assert moved.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        rules = (
+            db.query(RuleSet)
+            .filter(RuleSet.task_id == task_id)
+            .order_by(RuleSet.priority.asc(), RuleSet.id.asc())
+            .all()
+        )
+        assert [item.name for item in rules] == ["发票邮件", "项目邮件 v2"]
+    finally:
+        db.close()
+
+    # 删除规则
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    deleted = client.post(
+        f"/tasks/{task_id}/rules/1/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    deleted = client.post(
+        f"/tasks/{task_id}/rules/2/delete",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        assert db.query(RuleSet).count() == 0
+    finally:
+        db.close()
+
+
+def test_task_delete_cleans_orphan_mailbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "task-delete-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "deleter", "password-123")
+        lone = Mailbox(
+            user_id=user.id, email_address="lone@example.com", imap_host="fake",
+            username="deleter", credential_encrypted=encrypt_secret("s1", settings),
+        )
+        db.add(lone)
+        db.flush()
+        task_a = Task(user_id=user.id, mailbox_id=lone.id, name="独占邮箱任务", run_mode="manual")
+        db.add(task_a)
+        shared = Mailbox(
+            user_id=user.id, email_address="shared@example.com", imap_host="fake",
+            username="deleter", credential_encrypted=encrypt_secret("s2", settings),
+        )
+        db.add(shared)
+        db.flush()
+        task_b = Task(user_id=user.id, mailbox_id=shared.id, name="共享一", run_mode="manual")
+        task_c = Task(user_id=user.id, mailbox_id=shared.id, name="共享二", run_mode="manual")
+        db.add_all([task_b, task_c])
+        db.commit()
+        lone_id, shared_id = lone.id, shared.id
+        task_a_id, task_b_id = task_a.id, task_b.id
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "deleter", "password": "password-123", "csrf_token": token},
+    )
+    detail = client.get(f"/tasks/{task_a_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    deleted = client.post(
+        f"/tasks/{task_a_id}/delete", data={"csrf_token": token}, follow_redirects=False
+    )
+    assert deleted.status_code == 303
+    assert deleted.headers["location"] == "/tasks"
+    db = build_session_factory(settings)()
+    try:
+        assert db.get(Task, task_a_id) is None
+        # 独占邮箱随任务一并清理
+        assert db.get(Mailbox, lone_id) is None
+    finally:
+        db.close()
+
+    # 共享邮箱在仍有任务引用时保留
+    detail = client.get(f"/tasks/{task_b_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    client.post(f"/tasks/{task_b_id}/delete", data={"csrf_token": token})
+    db = build_session_factory(settings)()
+    try:
+        assert db.get(Task, task_b_id) is None
+        assert db.get(Mailbox, shared_id) is not None
+        assert db.query(Task).filter(Task.mailbox_id == shared_id).count() == 1
+    finally:
+        db.close()
+
+
+def test_manual_run_pipeline_sync_generate_success(tmp_path, monkeypatch):
+    import mailpulse.worker as worker_module
+
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "pipeline", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id, email_address="pipeline@example.com", imap_host="fake",
+            username="pipeline", credential_encrypted=encrypt_secret("pw", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        task = Task(
+            user_id=user.id, mailbox_id=mailbox.id, name="流水线任务",
+            run_mode="manual", lookback_hours=24,
+        )
+        db.add(task)
+        db.flush()
+        db.commit()
+        now = datetime.now(UTC)
+
+        # 同步使用演示邮件源；归纳使用 DemoProvider，避免外部 AI 依赖
+        monkeypatch.setattr(
+            worker_module, "IMAPConnector", lambda connection: FakeMailConnector(demo_messages())
+        )
+
+        class DemoReportService(ReportService):
+            def generate_for_user(
+                self, user, task=None, use_demo_provider=False, **kwargs
+            ):
+                return super().generate_for_user(
+                    user, task=task, use_demo_provider=True, **kwargs
+                )
+
+        monkeypatch.setattr(worker_module, "ReportService", DemoReportService)
+        job = run_task_now(db, task, settings, "manual:1:test", now)
+        db.commit()
+        assert job.status == "success"
+        assert job.stage == "complete"
+        report = db.query(Report).filter(Report.task_id == task.id).one()
+        assert report.status == "success"
+        assert report.run_key == "manual:1:test"
+        assert report.summary.get("message_count") == 2
+        task = db.get(Task, task.id)
+        assert task.last_run_at is not None
+        # 相同 run_key 重复执行不会生成重复报告
+        second = run_task_now(db, task, settings, "manual:1:test", now)
+        db.commit()
+        assert second.status == "success"
+        assert db.query(Report).filter(Report.task_id == task.id).count() == 1
+    finally:
+        db.close()
+
+
+def test_user_account_password_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "account-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    user = create_user(db, "acct", "password-123", display_name="原名")
+    db.commit()
+    db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    client.post(
+        "/login",
+        data={"username": user.username, "password": "password-123", "csrf_token": token},
+    )
+    account = client.get("/account")
+    assert "修改密码" in account.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+
+    # 当前密码错误被拒绝
+    wrong = client.post(
+        "/account",
+        data={
+            "display_name": "新名字",
+            "current_password": "wrong-password",
+            "new_password": "new-password-456",
+            "confirm_password": "new-password-456",
+            "csrf_token": token,
+        },
+    )
+    assert "当前密码不正确" in wrong.text
+
+    # 显示名更新 + 正确修改密码
+    ok = client.post(
+        "/account",
+        data={
+            "display_name": "新名字",
+            "current_password": "password-123",
+            "new_password": "new-password-456",
+            "confirm_password": "new-password-456",
+            "csrf_token": token,
+        },
+    )
+    assert "显示名称已更新" in ok.text
+    db = build_session_factory(settings)()
+    try:
+        assert db.get(User, user.id).display_name == "新名字"
+        assert authenticate(db, user.username, "new-password-456") is not None
+        assert authenticate(db, user.username, "password-123") is None
+    finally:
+        db.close()
+
+    # 两次新密码不一致被拒绝
+    account = client.get("/account")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+    mismatch = client.post(
+        "/account",
+        data={
+            "current_password": "new-password-456",
+            "new_password": "another-789",
+            "confirm_password": "different-789",
+            "csrf_token": token,
+        },
+    )
+    assert "两次输入的新密码不一致" in mismatch.text
+
+
+def test_rule_filter_messages_any_or_semantics(tmp_path):
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "oruser", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id, email_address="in@example.com", imap_host="fake",
+            username="oruser", credential_encrypted=encrypt_secret("s", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        task = Task(user_id=user.id, mailbox_id=mailbox.id, name="OR 任务", run_mode="manual")
+        db.add(task)
+        db.flush()
+        messages = []
+        for index, subject in enumerate(["项目周报", "发票通知", "无关广告"]):
+            message = CanonicalMessage(
+                owner_user_id=user.id,
+                content_hash=f"hash-{index}",
+                subject=subject,
+                sender=f"sender-{index}@example.com",
+                body_text=f"正文 {index}",
+            )
+            db.add(message)
+            messages.append(message)
+        db.flush()
+
+        def rule(name, value, enabled=True):
+            item = RuleSet(
+                task_id=task.id,
+                name=name,
+                definition={
+                    "kind": "condition",
+                    "field": "subject",
+                    "operator": "contains",
+                    "value": value,
+                },
+                is_enabled=enabled,
+                priority=100,
+            )
+            db.add(item)
+            return item
+
+        project = rule("项目邮件", "项目")
+        invoice = rule("发票邮件", "发票")
+        disabled = rule("停用规则", "广告", enabled=False)
+        db.flush()
+
+        service = RuleService(db)
+        result = service.filter_messages_any(messages, [project, invoice, disabled])
+        assert [item.subject for item in result] == ["项目周报", "发票通知"]
+        # 输入顺序保持
+        assert [item.subject for item in result] == [messages[0].subject, messages[1].subject]
+        # 全部停用（或无启用规则）时保留全部邮件
+        project.is_enabled = False
+        invoice.is_enabled = False
+        assert [
+            item.subject
+            for item in service.filter_messages_any(messages, [project, invoice])
+        ] == ["项目周报", "发票通知", "无关广告"]
+        assert len(service.filter_messages_any(messages, [])) == 3
+    finally:
+        db.close()
+
+
+def test_task_wizard_creation_with_rules_and_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "wizard-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "wizard", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="inbox@example.com",
+            imap_host="fake",
+            username="wizard",
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.commit()
+        mailbox_id = mailbox.id
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "wizard", "password": "password-123", "csrf_token": token},
+    )
+    new_page = client.get("/tasks/new")
+    assert new_page.status_code == 200
+    for step_name in ["基本信息", "收件邮箱", "筛选规则", "投递渠道"]:
+        assert step_name in new_page.text
+    token = re.search(r'name="csrf_token" value="([^"]+)"', new_page.text).group(1)
+
+    rules_json = json.dumps(
+        [
+            {
+                "name": "项目邮件",
+                "conditions": [
+                    {"field": "subject", "operator": "contains", "value": "项目"},
+                    {"field": "sender", "operator": "not_contains", "value": "noreply"},
+                ],
+            },
+            {
+                "name": "财务邮件",
+                "conditions": [
+                    {"field": "sender", "operator": "equals",
+                     "value": "finance@example.com"},
+                ],
+            },
+        ],
+        ensure_ascii=False,
+    )
+    targets_json = json.dumps(["boss@example.com", "team@example.com"])
+    created = client.post(
+        "/tasks",
+        data={
+            "name": "向导任务",
+            "run_mode": "scheduled",
+            "schedule_type": "daily",
+            "scheduled_time": "08:00",
+            "weekdays": "mon-fri",
+            "timezone": "Asia/Shanghai",
+            "lookback_hours": "24",
+            "is_enabled": "on",
+            "copy_from": str(mailbox_id),
+            "rules_json": rules_json,
+            "targets_json": targets_json,
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    task_id = int(created.headers["location"].split("/")[2])
+    db = build_session_factory(settings)()
+    try:
+        task = db.get(Task, task_id)
+        assert task.run_mode == "scheduled"
+        assert task.cron_expression == "0 8 * * *"
+        rules = (
+            db.query(RuleSet)
+            .filter(RuleSet.task_id == task_id)
+            .order_by(RuleSet.priority.asc())
+            .all()
+        )
+        assert rules[0].definition == {
+            "kind": "group",
+            "operator": "and",
+            "children": [
+                {"kind": "condition", "field": "subject", "operator": "contains", "value": "项目"},
+                {"kind": "condition", "field": "sender",
+                 "operator": "not_contains", "value": "noreply"},
+            ],
+        }
+        targets = db.query(TaskDeliveryTarget).filter(TaskDeliveryTarget.task_id == task_id).all()
+        assert {item.destination for item in targets} == {"boss@example.com", "team@example.com"}
+    finally:
+        db.close()
+
+    # 重复投递地址被拒绝并重渲染向导（保留已填内容）
+    dup = client.post(
+        "/tasks",
+        data={
+            "name": "向导任务",
+            "run_mode": "manual",
+            "copy_from": str(mailbox_id),
+            "rules_json": "[]",
+            "targets_json": json.dumps(["a@example.com", "a@example.com"]),
+            "csrf_token": token,
+        },
+    )
+    assert "已重复" in dup.text
+    assert "向导任务" in dup.text
+
+
+def test_delivery_target_edit_and_test_email(tmp_path, monkeypatch):
+    import mailpulse.web.routes as routes_module
+
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "target-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "targeter", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="inbox@example.com",
+            imap_host="fake",
+            smtp_host="fake-smtp",
+            username="targeter",
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        task = Task(user_id=user.id, mailbox_id=mailbox.id, name="渠道任务", run_mode="manual")
+        db.add(task)
+        db.flush()
+        target = TaskDeliveryTarget(task_id=task.id, destination="boss@example.com")
+        db.add(target)
+        db.commit()
+        task_id, target_id = task.id, target.id
+    finally:
+        db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "targeter", "password": "password-123", "csrf_token": token},
+    )
+
+    # 编辑投递地址
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    edited = client.post(
+        f"/tasks/{task_id}/targets/{target_id}/edit",
+        data={"destination": "newboss@example.com", "csrf_token": token},
+        follow_redirects=False,
+    )
+    assert edited.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        assert db.get(TaskDeliveryTarget, target_id).destination == "newboss@example.com"
+    finally:
+        db.close()
+    # 添加另一个地址后，编辑为已有地址被拒绝
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    client.post(
+        f"/tasks/{task_id}/targets",
+        data={"destination": "team@example.com", "csrf_token": token},
+    )
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    duplicate = client.post(
+        f"/tasks/{task_id}/targets/{target_id}/edit",
+        data={"destination": "team@example.com", "csrf_token": token},
+    )
+    assert "该投递邮箱已存在" in duplicate.text
+
+    # 发送测试邮件（桩 SMTP provider）
+    class RecordingSMTPProvider:
+        def __init__(self, config):
+            self.config = config
+            RecordingSMTPProvider.calls.append(config)
+
+        def send(self, sender, recipient, subject, body):
+            RecordingSMTPProvider.last = (sender, recipient, subject, body)
+
+    RecordingSMTPProvider.calls = []
+    RecordingSMTPProvider.last = None
+    monkeypatch.setattr(routes_module, "SMTPDeliveryProvider", RecordingSMTPProvider)
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    sent = client.post(
+        f"/tasks/{task_id}/targets/{target_id}/test",
+        data={"csrf_token": token},
+        follow_redirects=False,
+    )
+    assert sent.status_code == 303
+    assert sent.headers["location"].endswith("?notice=test-sent")
+    assert RecordingSMTPProvider.last is not None
+    assert RecordingSMTPProvider.last[0] == "inbox@example.com"
+    assert RecordingSMTPProvider.last[1] == "newboss@example.com"
+    assert "MailPulse 投递渠道测试" in RecordingSMTPProvider.last[2]

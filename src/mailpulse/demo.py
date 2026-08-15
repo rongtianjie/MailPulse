@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .mail.connectors import FakeMailConnector
 from .mail.sync import MailSyncService
 from .mail.types import RawAttachment, RawMessage
-from .models import Mailbox, User
+from .models import Mailbox, Task, User
 from .security import encrypt_secret
 
 
@@ -60,6 +60,17 @@ def seed_demo(session: Session, user: User, data_dir: Path) -> int:
             credential_encrypted=encrypt_secret("demo-password"),
         )
         session.add(mailbox)
+        session.flush()
+    task = session.scalar(select(Task).where(Task.user_id == user.id))
+    if task is None:
+        task = Task(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            name="演示任务",
+            run_mode="manual",
+            is_enabled=True,
+        )
+        session.add(task)
         session.flush()
     result = MailSyncService(session).sync(mailbox, FakeMailConnector(demo_messages()))
     return result.created

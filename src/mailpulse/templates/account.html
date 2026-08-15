@@ -1,0 +1,26 @@
+{% extends "user_base.html" %}
+{% block title %}账号设置 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">账号</p><h1>账号设置</h1></div></div>
+{% if password_error %}<div class="alert error">{{ password_error }}</div>{% endif %}
+{% if name_saved %}<div class="alert success">显示名称已更新。</div>{% endif %}
+<section class="card narrow">
+  <h2>基本信息</h2>
+  <form method="post" action="/account" class="stack" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>显示名称<input name="display_name" value="{{ user.display_name }}" maxlength="120"></label>
+    <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">保存</button></div>
+  </form>
+</section>
+<section class="card narrow">
+  <h2>修改密码</h2>
+  <p class="muted">密码长度至少 8 个字符。系统不保存明文密码。</p>
+  <form method="post" action="/account" class="stack" data-disable-on-submit>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>当前密码<input type="password" name="current_password" autocomplete="current-password"></label>
+    <label>新密码<input type="password" name="new_password" autocomplete="new-password"></label>
+    <label>确认新密码<input type="password" name="confirm_password" autocomplete="new-password"></label>
+    <div class="form-actions"><button class="primary" type="submit" data-processing-label="修改中…">修改密码</button></div>
+  </form>
+</section>
+{% endblock %}

@@ -32,6 +32,7 @@ class RuleEvaluator:
     allowed_operators = {
         "equals",
         "contains",
+        "not_contains",
         "starts_with",
         "ends_with",
         "regex",
@@ -104,6 +105,8 @@ class RuleEvaluator:
             return actual_text == expected_text
         if operator == "contains":
             return expected_text in actual_text
+        if operator == "not_contains":
+            return expected_text not in actual_text
         if operator == "starts_with":
             return actual_text.startswith(expected_text)
         if operator == "ends_with":

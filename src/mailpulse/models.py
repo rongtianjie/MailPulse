@@ -32,14 +32,20 @@ class User(Base):
     mailboxes: Mapped[list[Mailbox]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    tasks: Mapped[list[Task]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Mailbox(Base):
+    """A receive-side (IMAP) mailbox plus its send-side (SMTP) identity.
+
+    A mailbox belongs to a user and may be referenced by one or more tasks.
+    """
+
     __tablename__ = "mailboxes"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    name: Mapped[str] = mapped_column(String(120), default="默认邮箱")
+    name: Mapped[str] = mapped_column(String(120), default="收件邮箱")
     email_address: Mapped[str] = mapped_column(String(320))
     imap_host: Mapped[str] = mapped_column(String(255))
     imap_port: Mapped[int] = mapped_column(Integer, default=993)
@@ -61,6 +67,82 @@ class Mailbox(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="mailboxes")
+
+
+class Task(Base):
+    """A user task: one receive mailbox, its filter rules and delivery channels.
+
+    Tasks are the unit of configuration in the user workspace. A task may run
+    on demand (run_mode="manual") or on a cron schedule (run_mode="scheduled").
+    """
+
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    mailbox_id: Mapped[int] = mapped_column(
+        ForeignKey("mailboxes.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), default="新任务")
+    run_mode: Mapped[str] = mapped_column(String(32), default="manual")
+    cron_expression: Mapped[str] = mapped_column(String(120), default="0 9 * * 1-5")
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    lookback_hours: Mapped[int] = mapped_column(Integer, default=24)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    user: Mapped[User] = relationship(back_populates="tasks")
+    mailbox: Mapped[Mailbox] = relationship()
+    rules: Mapped[list[RuleSet]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    delivery_targets: Mapped[list[TaskDeliveryTarget]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+
+
+class RuleSet(Base):
+    """A named filter definition owned by exactly one task."""
+
+    __tablename__ = "rule_sets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    task: Mapped[Task] = relationship(back_populates="rules")
+
+
+class TaskDeliveryTarget(Base):
+    """A report delivery destination configured per task.
+
+    The web channel is always available (reports are stored and viewable), so
+    only SMTP destinations are persisted here; the mailbox address is the
+    receive-side (IMAP) account and stays separate from these send-side
+    destinations.
+    """
+
+    __tablename__ = "task_delivery_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="smtp")
+    destination: Mapped[str] = mapped_column(String(320))
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="delivery_targets")
 
 
 class CanonicalMessage(Base):
@@ -146,67 +228,6 @@ class Attachment(Base):
     message: Mapped[CanonicalMessage] = relationship(back_populates="attachments")
 
 
-class RuleSet(Base):
-    __tablename__ = "rule_sets"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    name: Mapped[str] = mapped_column(String(160))
-    definition: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    priority: Mapped[int] = mapped_column(Integer, default=100)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, onupdate=utc_now
-    )
-
-
-class Schedule(Base):
-    __tablename__ = "schedules"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    mailbox_id: Mapped[int] = mapped_column(
-        ForeignKey("mailboxes.id", ondelete="CASCADE"), index=True
-    )
-    rule_set_id: Mapped[int | None] = mapped_column(
-        ForeignKey("rule_sets.id", ondelete="SET NULL"), nullable=True
-    )
-    name: Mapped[str] = mapped_column(String(160), default="每日报告")
-    cron_expression: Mapped[str] = mapped_column(String(120), default="0 9 * * 1-5")
-    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
-    lookback_hours: Mapped[int] = mapped_column(Integer, default=24)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-    delivery_targets: Mapped[list[ScheduleDeliveryTarget]] = relationship(
-        back_populates="schedule", cascade="all, delete-orphan"
-    )
-
-
-class ScheduleDeliveryTarget(Base):
-    """A report delivery destination configured per schedule.
-
-    A schedule may deliver its reports to multiple targets (channels); the
-    mailbox address is the receive-side (IMAP) account and is deliberately
-    kept separate from these send-side destinations.
-    """
-
-    __tablename__ = "schedule_delivery_targets"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    schedule_id: Mapped[int] = mapped_column(
-        ForeignKey("schedules.id", ondelete="CASCADE"), index=True
-    )
-    channel: Mapped[str] = mapped_column(String(32), default="smtp")
-    destination: Mapped[str] = mapped_column(String(320))
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-    schedule: Mapped[Schedule] = relationship(back_populates="delivery_targets")
-
-
 class AIProviderProfile(Base):
     __tablename__ = "ai_provider_profiles"
 
@@ -253,8 +274,8 @@ class Report(Base):
     mailbox_id: Mapped[int] = mapped_column(
         ForeignKey("mailboxes.id", ondelete="CASCADE"), index=True
     )
-    schedule_id: Mapped[int | None] = mapped_column(
-        ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
     run_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -269,6 +290,8 @@ class Report(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+    task: Mapped[Task | None] = relationship()
 
 
 class Delivery(Base):
@@ -295,8 +318,8 @@ class JobRun(Base):
     mailbox_id: Mapped[int | None] = mapped_column(
         ForeignKey("mailboxes.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    schedule_id: Mapped[int | None] = mapped_column(
-        ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
     run_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     stage: Mapped[str] = mapped_column(String(64), default="sync")

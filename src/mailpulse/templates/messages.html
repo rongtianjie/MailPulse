@@ -1,18 +1,29 @@
 {% extends "user_base.html" %}
 {% block title %}邮件 - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">本地邮件索引</p><h1>邮件</h1><p class="muted">共 {{ total }} 封匹配邮件</p></div></div>
+<div class="page-heading"><div><p class="eyebrow">本地邮件索引</p><h1>邮件</h1><p class="muted">共 {{ total }} 封匹配邮件 · 范围为所有任务邮箱同步的全部邮件</p></div></div>
 <section class="card">
   <form method="get" action="/messages" class="search-bar">
     <input name="q" value="{{ query }}" placeholder="搜索主题、发件人或正文">
     {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    {% if mailbox_id %}<input type="hidden" name="mailbox_id" value="{{ mailbox_id }}">{% endif %}
     <button class="secondary" type="submit">搜索</button>
   </form>
+  {% if mailboxes %}
+  <form method="get" action="/messages" class="mailbox-filter">
+    <input type="hidden" name="q" value="{{ query }}">
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    <select name="mailbox_id" onchange="this.form.submit()">
+      <option value="">全部邮箱</option>
+      {% for mailbox in mailboxes %}<option value="{{ mailbox.id }}" {% if mailbox_id == mailbox.id %}selected{% endif %}>{{ mailbox.email_address }}</option>{% endfor %}
+    </select>
+  </form>
+  {% endif %}
   <nav class="filter-tabs">
-    <a class="{{ 'active' if status == '' else '' }}" href="/messages{% if query %}?q={{ query }}{% endif %}">全部</a>
-    <a class="{{ 'active' if status == 'unprocessed' else '' }}" href="/messages?status=unprocessed{% if query %}&q={{ query }}{% endif %}">未处理</a>
-    <a class="{{ 'active' if status == 'processed' else '' }}" href="/messages?status=processed{% if query %}&q={{ query }}{% endif %}">已处理</a>
-    <a class="{{ 'active' if status == 'starred' else '' }}" href="/messages?status=starred{% if query %}&q={{ query }}{% endif %}">已加星</a>
+    <a class="{{ 'active' if status == '' else '' }}" href="/messages{% if query %}?q={{ query }}{% endif %}{% if mailbox_id %}{% if query %}&{% else %}?{% endif %}mailbox_id={{ mailbox_id }}{% endif %}">全部</a>
+    <a class="{{ 'active' if status == 'unprocessed' else '' }}" href="/messages?status=unprocessed{% if query %}&q={{ query }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">未处理</a>
+    <a class="{{ 'active' if status == 'processed' else '' }}" href="/messages?status=processed{% if query %}&q={{ query }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">已处理</a>
+    <a class="{{ 'active' if status == 'starred' else '' }}" href="/messages?status=starred{% if query %}&q={{ query }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">已加星</a>
   </nav>
   {% if messages %}
   <div class="list">
@@ -37,9 +48,9 @@
   </div>
   {% if pages > 1 %}
   <nav class="pagination">
-    {% if page > 1 %}<a class="button" href="/messages?page={{ page - 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}">上一页</a>{% endif %}
+    {% if page > 1 %}<a class="button" href="/messages?page={{ page - 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">上一页</a>{% endif %}
     <span class="muted">第 {{ page }} / {{ pages }} 页</span>
-    {% if page < pages %}<a class="button" href="/messages?page={{ page + 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}">下一页</a>{% endif %}
+    {% if page < pages %}<a class="button" href="/messages?page={{ page + 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">下一页</a>{% endif %}
   </nav>
   {% endif %}
   {% else %}<p class="empty">没有匹配邮件。</p>{% endif %}

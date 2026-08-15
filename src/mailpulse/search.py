@@ -4,7 +4,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from .models import CanonicalMessage
+from .models import CanonicalMessage, MessageOccurrence
 
 
 class SearchService:
@@ -89,11 +89,16 @@ class SearchService:
         limit: int = 100,
         offset: int = 0,
         status: str = "",
+        mailbox_id: int | None = None,
     ) -> list[CanonicalMessage]:
         query = query.strip()
         statement = self.session.query(CanonicalMessage).filter(
             CanonicalMessage.owner_user_id == owner_user_id
         )
+        if mailbox_id is not None:
+            statement = statement.join(
+                MessageOccurrence, MessageOccurrence.message_id == CanonicalMessage.id
+            ).filter(MessageOccurrence.mailbox_id == mailbox_id)
         if query:
             use_fts = self._use_fts(query)
             fts_ids = self._fts_ids(owner_user_id, query, limit + offset) if use_fts else None
@@ -105,16 +110,25 @@ class SearchService:
                 statement = statement.filter(CanonicalMessage.id.in_(fts_ids))
         statement = self._apply_status(statement, status)
         return list(
-            statement.order_by(CanonicalMessage.received_at.desc()).offset(offset).limit(limit)
+            statement.order_by(CanonicalMessage.received_at.desc())
+            .distinct()
+            .offset(offset)
+            .limit(limit)
         )
 
-    def count(self, owner_user_id: int, query: str = "", status: str = "") -> int:
+    def count(
+        self,
+        owner_user_id: int,
+        query: str = "",
+        status: str = "",
+        mailbox_id: int | None = None,
+    ) -> int:
         """Total matches for pagination; mirrors search() filtering semantics."""
         query = query.strip()
-        # FTS rows do not contain the local status flags. Use the canonical
-        # table fallback whenever a status filter is active so the count and
-        # paginated result set remain consistent.
-        if query and not status and self._use_fts(query):
+        # FTS rows do not contain the local status flags or mailbox scope. Use
+        # the canonical table fallback whenever those filters are active so the
+        # count and paginated result set remain consistent.
+        if query and not status and not mailbox_id and self._use_fts(query):
             try:
                 with self.session.begin_nested():
                     total = self.session.execute(
@@ -128,10 +142,14 @@ class SearchService:
             except Exception:
                 pass
         statement = (
-            select(func.count())
+            select(func.count(func.distinct(CanonicalMessage.id)))
             .select_from(CanonicalMessage)
             .where(CanonicalMessage.owner_user_id == owner_user_id)
         )
+        if mailbox_id is not None:
+            statement = statement.join(
+                MessageOccurrence, MessageOccurrence.message_id == CanonicalMessage.id
+            ).where(MessageOccurrence.mailbox_id == mailbox_id)
         if query:
             statement = self._apply_like(statement, query)
         statement = self._apply_status(statement, status)

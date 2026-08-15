@@ -110,14 +110,18 @@ def main() -> None:
             logger.info("已写入演示邮件: {} 封", created)
             return
         if args.command == "run-once":
+            from .models import Task
             from .report_service import ReportService
 
             user = db.query(User).filter(User.username == args.username.strip().lower()).one()
+            task = db.query(Task).filter(Task.user_id == user.id).order_by(Task.id.asc()).first()
+            if task is None:
+                raise SystemExit("该用户还没有任务，请先通过网页创建任务或运行 seed-demo")
             report = ReportService(db, settings).generate_for_user(
-                user, use_demo_provider=args.demo_ai
+                user, task=task, use_demo_provider=args.demo_ai
             )
             db.commit()
-            logger.info("已生成报告: {}", report.id)
+            logger.info("已生成报告: {}（任务: {}）", report.id, task.name)
             return
         if args.command == "worker":
             db.close()

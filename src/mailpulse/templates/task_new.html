@@ -1,0 +1,125 @@
+{% extends "user_base.html" %}
+{% block title %}新建任务 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">配置中心</p><h1>新建任务</h1><p class="muted">按四个步骤完成配置：基本信息、收件邮箱、筛选规则和投递渠道。</p></div>
+  <a class="link-button" href="/tasks">返回任务列表</a>
+</div>
+{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+{% if notice %}<div class="alert success">{{ notice }}</div>{% endif %}
+<form method="post" action="/tasks" data-disable-on-submit data-wizard>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="rules_json" id="rules-json" value="{{ rules_form | tojson | forceescape }}">
+  <input type="hidden" name="targets_json" id="targets-json" value="{{ targets_form | tojson | forceescape }}">
+  <ol class="wizard-steps" aria-label="创建步骤">
+    <li data-step="1" class="active"><span class="wizard-index">1</span>基本信息</li>
+    <li data-step="2"><span class="wizard-index">2</span>收件邮箱</li>
+    <li data-step="3"><span class="wizard-index">3</span>筛选规则</li>
+    <li data-step="4"><span class="wizard-index">4</span>投递渠道</li>
+  </ol>
+
+  <section class="card wizard-step" data-step="1">
+    <h2>基本信息</h2>
+    <div class="form-grid">
+      <label>任务名称<input name="name" value="{{ form.name }}" placeholder="如：每日项目邮件归纳" required></label>
+      <label>执行方式<select name="run_mode">
+        <option value="manual" {% if form.run_mode == 'manual' %}selected{% endif %}>手动运行（点击按钮生成报告）</option>
+        <option value="scheduled" {% if form.run_mode == 'scheduled' %}selected{% endif %}>定时运行</option>
+      </select></label>
+      <label>计划类型<select name="schedule_type">
+        <option value="daily" {% if form.schedule_type == 'daily' %}selected{% endif %}>每日</option>
+        <option value="weekly" {% if form.schedule_type == 'weekly' %}selected{% endif %}>每周</option>
+        <option value="custom" {% if form.schedule_type == 'custom' %}selected{% endif %}>自定义 cron</option>
+      </select></label>
+      <label>执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
+      <label>每周范围<select name="weekdays">
+        <option value="mon-fri" {% if form.weekdays == 'mon-fri' %}selected{% endif %}>周一至周五</option>
+        <option value="mon-sun" {% if form.weekdays == 'mon-sun' %}selected{% endif %}>每天</option>
+        <option value="sat,sun" {% if form.weekdays == 'sat,sun' %}selected{% endif %}>周末</option>
+        <option value="mon,wed,fri" {% if form.weekdays == 'mon,wed,fri' %}selected{% endif %}>周一、三、五</option>
+      </select></label>
+      <label>自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
+      <label>时区<input name="timezone" value="{{ form.timezone }}" required></label>
+      <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="{{ form.lookback_hours }}" required></label>
+      <label class="check"><input type="checkbox" name="is_enabled" {% if form.is_enabled %}checked{% endif %}> 创建后启用</label>
+    </div>
+    <p class="muted compact">定时任务按 IANA 时区定期同步邮箱并生成报告；手动任务只在点击「立即运行」时执行。</p>
+    <div class="wizard-nav"><button type="button" class="primary" data-next>下一步：收件邮箱</button></div>
+  </section>
+
+  <section class="card wizard-step" data-step="2">
+    <h2>收件邮箱</h2>
+    <p class="muted">配置任务读取邮件的 IMAP 收件信息。密码加密保存，不会显示在页面或日志中。</p>
+    {% if mailboxes %}
+    <label>复制已有邮箱配置<select name="copy_from">
+      <option value="">不复制，手动填写</option>
+      {% for mailbox in mailboxes %}<option value="{{ mailbox.id }}">{{ mailbox.email_address }}（{{ mailbox.imap_host }}）</option>{% endfor %}
+    </select></label>
+    <p class="muted compact">选择后 IMAP/SMTP 字段将沿用已有配置，密码无需重新填写。</p>
+    {% endif %}
+    <div class="form-grid">
+      <label>邮箱名称<input name="mailbox_name" value="{{ mailbox_form.name }}"></label>
+      <label>邮箱地址<input type="email" name="email_address" value="{{ mailbox_form.email_address }}" required></label>
+      <label>IMAP 主机<input name="imap_host" value="{{ mailbox_form.imap_host }}" placeholder="如 imap.example.com" required></label>
+      <label>IMAP 端口<input type="number" name="imap_port" value="{{ mailbox_form.imap_port }}" required></label>
+      <label>登录用户名<input name="username" value="{{ mailbox_form.username }}" required></label>
+      <label>邮箱密码<input type="password" name="password" value="{{ mailbox_form.password }}" required placeholder="首次配置必须填写"></label>
+      <label>同步文件夹<input name="folder" value="{{ mailbox_form.folder }}"></label>
+    </div>
+    <details class="smtp-optional">
+      <summary>SMTP 发件配置（可选）</summary>
+      <p class="muted compact">如果后续需要通过邮件接收归纳报告（投递渠道、测试邮件、手动发送），则需要配置 SMTP 发件信息；仅网页查看则无需配置。</p>
+      <div class="form-grid">
+        <label>SMTP 主机<input name="smtp_host" value="{{ mailbox_form.smtp_host }}" placeholder="如 smtp.example.com"></label>
+        <label>SMTP 端口<input type="number" name="smtp_port" value="{{ mailbox_form.smtp_port }}"></label>
+      </div>
+    </details>
+    <div class="wizard-nav">
+      <button type="submit" class="secondary" formaction="/tasks/new/test-imap" formmethod="post" data-processing-label="验证中…">验证 IMAP 连接</button>
+      <button type="submit" class="secondary" formaction="/tasks/new/test-smtp" formmethod="post" data-processing-label="验证中…">验证 SMTP 连接</button>
+      <button type="button" class="link-button" data-prev>上一步</button>
+      <button type="button" class="primary" data-next>下一步：筛选规则</button>
+    </div>
+  </section>
+
+  <section class="card wizard-step" data-step="3">
+    <div class="section-heading"><h2>筛选规则</h2><span class="muted">满足任一启用规则的邮件将进入报告；不配置则处理全部邮件</span></div>
+    <div class="rule-list" data-rule-list>
+      {% for rule in rules_form %}
+      {% include "partials/rule_form_row.html" %}
+      {% endfor %}
+      {% if not rules_form %}{% include "partials/rule_form_row.html" %}{% endif %}
+    </div>
+    <div class="form-actions">
+      <button type="button" class="secondary" data-add-rule>+ 添加规则</button>
+    </div>
+    <div class="wizard-nav">
+      <button type="button" class="link-button" data-prev>上一步</button>
+      <button type="button" class="primary" data-next>下一步：投递渠道</button>
+    </div>
+  </section>
+
+  <section class="card wizard-step" data-step="4">
+    <h2>投递渠道</h2>
+    <div class="list">
+      <div class="list-item">
+        <span><strong>网页内直接查看</strong><small>报告生成后始终保存，可在「报告」页面查看，不可关闭</small></span>
+        <span class="tag success">始终开启</span>
+      </div>
+    </div>
+    <div class="section-heading"><h3>邮件发送</h3><span class="muted">添加用于接收报告的邮箱地址，可配置多个</span></div>
+    <div class="targets-form">
+      <label class="inline-field">投递邮箱地址<input type="email" id="target-input" placeholder="如 boss@example.com"></label>
+      <button type="button" class="secondary" data-add-target>添加地址</button>
+    </div>
+    <ul class="target-chips" data-target-list>
+      {% for target in targets_form %}<li data-email="{{ target }}">{{ target }}<button type="button" class="target-remove" data-remove-target title="移除">×</button></li>{% endfor %}
+    </ul>
+    <p class="muted compact">提示：发送邮件（含测试邮件）需要在该任务「收件邮箱」中配置 SMTP 发件信息；未配置时邮件渠道仅保存地址，不会实际发送。</p>
+    <div class="wizard-nav">
+      <button type="button" class="link-button" data-prev>上一步</button>
+      <button type="submit" class="primary" data-processing-label="创建中…">创建任务</button>
+    </div>
+  </section>
+</form>
+{% endblock %}

@@ -1,39 +1,66 @@
 {% extends "user_base.html" %}
 {% block title %}概览 - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">工作台</p><h1>你好，{{ user.display_name }}</h1></div></div>
-{% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+<div class="page-heading">
+  <div><p class="eyebrow">工作台</p><h1>你好，{{ user.display_name }}</h1><p class="muted">通过任务组织邮箱、筛选规则与报告投递。</p></div>
+  <a class="button primary" href="/tasks/new">+ 新建任务</a>
+</div>
 <section class="stats-grid">
-  <div class="stat-card"><span>已同步邮件</span><strong>{{ message_count }}</strong></div>
-  <div class="stat-card"><span>最近报告</span><strong>{{ reports|length }}</strong></div>
-  <div class="stat-card"><span>邮箱状态</span><strong>{{ '已配置' if mailbox else '待配置' }}</strong></div>
+  <div class="stat-card"><span>任务</span><strong>{{ task_cards|length }}</strong><small>{{ task_cards|selectattr('task.is_enabled')|list|length }} 个已启用</small></div>
+  <div class="stat-card"><span>收件邮箱</span><strong>{{ mailboxes|length }}</strong></div>
+  <div class="stat-card"><span>已同步邮件</span><strong>{{ message_count }}</strong><small>跨所有任务邮箱</small></div>
 </section>
-<section class="grid-2">
-  <div class="card">
-    <h2>快速开始</h2>
-    <ol class="steps">
-      <li class="{{ 'done' if mailbox else '' }}">配置邮箱连接</li>
-      <li class="{{ 'done' if message_count > 0 else '' }}">运行同步任务</li>
-      <li class="{{ 'done' if reports else '' }}">选择规则并生成报告</li>
-    </ol>
-    <div class="actions">
-      <a class="button" href="/settings">邮箱设置</a>
-      {% if mailbox %}<form method="post" action="/sync" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" data-processing-label="同步中…">立即同步</button></form>{% endif %}
-    </div>
-  </div>
-  <div class="card">
-    <h2>报告生成</h2>
-    <p class="muted">系统会按已配置的邮箱、筛选规则和模型生成结构化报告。</p>
-    <form method="post" action="/reports/generate" class="actions" data-disable-on-submit>
+{% if demo_available %}
+<section class="card demo-card">
+  <div class="section-heading">
+    <div><h2>快速体验</h2><p class="muted">写入两封演示邮件并创建一个演示任务，然后从任务详情页运行它。</p></div>
+    <form method="post" action="/demo/seed" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="primary" type="submit" data-processing-label="生成中…">生成报告</button>
+      <button class="secondary" type="submit" data-processing-label="写入中…">写入演示数据</button>
     </form>
   </div>
 </section>
+{% endif %}
 <section class="card">
-  <div class="section-heading"><h2>最近报告</h2><a href="/reports">查看全部</a></div>
+  <div class="section-heading"><h2>任务状态</h2><a class="link-button" href="/tasks">查看全部</a></div>
+  {% if task_cards %}
+  <div class="task-grid">
+    {% for card in task_cards %}
+    <a class="task-card" href="/tasks/{{ card.task.id }}">
+      <div class="task-card-head">
+        <strong>{{ card.task.name }}</strong>
+        <span class="tag {{ 'success' if card.task.is_enabled else 'muted' }}">{{ '启用' if card.task.is_enabled else '停用' }}</span>
+      </div>
+      <p class="muted task-card-mail">{{ card.mailbox.email_address if card.mailbox else '—' }}</p>
+      <div class="task-card-meta">
+        <span class="tag {{ 'success' if card.status == 'success' else ('failed' if card.status == 'failed' else ('running' if card.status == 'running' else 'pending')) }}">{{ '运行成功' if card.status == 'success' else ('运行失败' if card.status == 'failed' else ('运行中' if card.status == 'running' else '尚未运行')) }}</span>
+        <small class="muted">{{ card.task.run_mode == 'scheduled' and '定时 · ' or '手动 · ' }}{{ '邮件×' ~ card.target_count if card.target_count else '仅网页' }}</small>
+      </div>
+      <small class="muted">
+        {% if card.task.run_mode == 'scheduled' %}
+          {{ card.task.cron_expression }}<br>下次运行：{{ card.next_run | fmt_time }}
+        {% else %}
+          手动运行
+        {% endif %}
+      </small>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">还没有任务。点击右上角「新建任务」开始配置，或使用演示数据快速体验。</p>
+  {% endif %}
+</section>
+<section class="card">
+  <div class="section-heading"><h2>最近报告</h2><a class="link-button" href="/reports">查看全部</a></div>
   {% if reports %}
-  <div class="list">{% for report in reports %}<a class="list-item" href="/reports/{{ report.id }}"><span>{{ report.title }}</span><span class="muted">{{ report.created_at | fmt_time }}</span></a>{% endfor %}</div>
-  {% else %}<p class="empty">暂无报告。完成邮箱同步后即可生成报告。</p>{% endif %}
+  <div class="list">
+    {% for report in reports %}
+    <a class="list-item" href="/reports/{{ report.id }}">
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
+      <span class="muted">{{ report.created_at | fmt_time }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}<p class="empty">暂无报告。创建任务后点击「立即运行」生成第一份报告。</p>{% endif %}
 </section>
 {% endblock %}
