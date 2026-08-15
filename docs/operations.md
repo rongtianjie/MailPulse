@@ -42,10 +42,12 @@ cp .env.example .env
 启动网页服务：
 
 ```bash
-uv run mailpulse serve --host 127.0.0.1 --port 8080
+uv run mailpulse serve
 ```
 
 服务仅在首次创建默认管理员时打印登录信息。首次登录后会进入密码设置页面，可以修改密码，也可以暂时跳过。
+
+`serve` 默认读取 `.env` 中的 `MAILPULSE_HOST` 和 `MAILPULSE_PORT`；命令行提供的 `--host` 或 `--port` 会临时覆盖对应配置。
 
 需要在服务启动前显式初始化时，使用幂等命令：
 

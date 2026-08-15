@@ -14,8 +14,8 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
 
     serve = subparsers.add_parser("serve", help="启动网页服务")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument("--host", default=None, help="临时覆盖 MAILPULSE_HOST")
+    serve.add_argument("--port", type=int, default=None, help="临时覆盖 MAILPULSE_PORT")
     serve.add_argument("--reload", action="store_true")
 
     init = subparsers.add_parser("init", help="初始化数据库和管理员账号")
@@ -37,18 +37,18 @@ def main() -> None:
     subparsers.add_parser("worker", help="启动后台任务 worker")
 
     args = parser.parse_args()
+    settings = get_settings()
     if args.command == "serve":
         import uvicorn
 
         uvicorn.run(
             "mailpulse.app:create_app",
-            host=args.host,
-            port=args.port,
+            host=args.host if args.host is not None else settings.host,
+            port=args.port if args.port is not None else settings.port,
             reload=args.reload,
             factory=True,
         )
         return
-    settings = get_settings()
     if args.command == "reset-db":
         if not args.confirm:
             parser.error("reset-db 是破坏性操作，请同时提供 --confirm")

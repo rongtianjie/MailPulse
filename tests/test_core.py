@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import re
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, select, text
 
+from mailpulse import cli
 from mailpulse.ai.orchestrator import AIOrchestrator, ModelRouter
 from mailpulse.ai.profile_service import AIProfileService
 from mailpulse.ai.providers import OpenAICompatibleProvider
@@ -77,6 +79,24 @@ def test_password_and_credential_round_trip(tmp_path):
     assert not verify_password("wrong-password", password_hash)
 
 
+def test_serve_uses_settings_and_allows_cli_overrides(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings(host="0.0.0.0", port=9090))
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    monkeypatch.setattr(sys, "argv", ["mailpulse", "serve"])
+    cli.main()
+    assert calls[-1][1]["host"] == "0.0.0.0"
+    assert calls[-1][1]["port"] == 9090
+
+    monkeypatch.setattr(
+        sys, "argv", ["mailpulse", "serve", "--host", "127.0.0.1", "--port", "8081"]
+    )
+    cli.main()
+    assert calls[-1][1]["host"] == "127.0.0.1"
+    assert calls[-1][1]["port"] == 8081
+
+
 def test_parse_json_text_accepts_singleton_object_array_from_compatible_server():
     assert parse_json_text('[{"summary":"ok"}]') == {"summary": "ok"}
     assert parse_json_text('[{"summary":"ok"},{"extra":true}]') is None
@@ -126,7 +146,12 @@ def test_reset_database_recreates_default_admin(tmp_path):
 
 def test_production_settings_require_explicit_secrets(tmp_path):
     with pytest.raises(ValueError):
-        Settings(data_dir=tmp_path, environment="production")
+        Settings(
+            data_dir=tmp_path,
+            environment="production",
+            secret_key="mailpulse-development-only-change-me",
+            credential_key=None,
+        )
     settings = Settings(
         data_dir=tmp_path,
         environment="production",
