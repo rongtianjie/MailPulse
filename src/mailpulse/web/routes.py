@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..auth import authenticate, create_user
+from ..auth import authenticate, create_user, set_password
 from ..config import get_settings
 from ..delivery import ReportDeliveryService, SMTPConfig, SMTPDeliveryProvider
 from ..demo import seed_demo
@@ -90,13 +90,19 @@ def _build_imap_connector(mailbox: Mailbox, settings) -> IMAPConnector:
     )
 
 
+def _login_redirect(user: User) -> str:
+    if user.role == "admin":
+        return "/admin/account/password" if user.must_change_password else "/admin"
+    return "/"
+
+
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)):
     user_id = request.session.get("user_id")
     if user_id:
         user = db.get(User, int(user_id))
         if user and user.is_active:
-            return RedirectResponse("/admin" if user.role == "admin" else "/", status_code=303)
+            return RedirectResponse(_login_redirect(user), status_code=303)
         request.session.clear()
     return _render(request, "login.html", error=None)
 
@@ -125,7 +131,7 @@ def login(
         AuditLog(actor_user_id=user.id, action="login", target_type="user", target_id=str(user.id))
     )
     db.commit()
-    return RedirectResponse("/admin" if user.role == "admin" else "/", status_code=303)
+    return RedirectResponse(_login_redirect(user), status_code=303)
 
 
 @router.post("/logout")
@@ -133,6 +139,61 @@ def logout(request: Request, csrf_token: str | None = Form(None)):
     validate_csrf(request, csrf_token)
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
+
+
+@router.get("/admin/account/password", response_class=HTMLResponse)
+def admin_password_page(request: Request, user: User = Depends(admin_user)):
+    return _render(request, "admin_password.html", user=user, error=None)
+
+
+@router.post("/admin/account/password", response_class=HTMLResponse)
+def change_admin_password(
+    request: Request,
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    if new_password != confirm_password:
+        return _render(request, "admin_password.html", user=user, error="两次输入的密码不一致")
+    try:
+        set_password(user, new_password)
+        db.add(
+            AuditLog(
+                actor_user_id=user.id,
+                action="admin_password_change",
+                target_type="user",
+                target_id=str(user.id),
+            )
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        return _render(request, "admin_password.html", user=user, error=str(exc))
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/account/password/skip")
+def skip_admin_password_change(
+    request: Request,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    user.must_change_password = False
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            action="admin_password_change_skip",
+            target_type="user",
+            target_id=str(user.id),
+        )
+    )
+    db.commit()
+    return RedirectResponse("/admin", status_code=303)
 
 
 @router.get("/", response_class=HTMLResponse)

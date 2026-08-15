@@ -8,6 +8,7 @@
     <a href="/admin/users" class="{{ 'active' if request.url.path.startswith('/admin/users') else '' }}">用户管理</a>
     <a href="/admin/models" class="{{ 'active' if request.url.path.startswith('/admin/models') else '' }}">模型管理</a>
     <a href="/admin/jobs" class="{{ 'active' if request.url.path.startswith('/admin/jobs') else '' }}">任务监控</a>
+    <a href="/admin/account/password" class="{{ 'active' if request.url.path.startswith('/admin/account') else '' }}">账号设置</a>
   </nav>
   <span class="session-user">{{ user.display_name }}</span>
   <form class="session-actions" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">退出</button></form>

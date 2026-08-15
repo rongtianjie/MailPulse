@@ -4,7 +4,7 @@ import argparse
 
 from .auth import create_user
 from .config import get_settings
-from .db import build_session_factory, init_database
+from .db import bootstrap_database, build_session_factory, init_database, reset_database
 from .demo import seed_demo
 from .models import User
 
@@ -23,6 +23,10 @@ def main() -> None:
     init.add_argument("--admin-password", required=True)
     init.add_argument("--display-name", default="系统管理员")
     init.add_argument("--demo", action="store_true", help="同时写入演示邮件")
+
+    subparsers.add_parser("init-db", help="初始化数据库并创建默认管理员账号")
+    reset = subparsers.add_parser("reset-db", help="重置 SQLite 数据库并创建默认管理员账号")
+    reset.add_argument("--confirm", action="store_true", help="确认删除当前数据库")
 
     seed = subparsers.add_parser("seed-demo", help="为指定用户写入演示邮件")
     seed.add_argument("--user-email", required=True)
@@ -45,7 +49,22 @@ def main() -> None:
         )
         return
     settings = get_settings()
-    init_database(settings)
+    if args.command == "reset-db":
+        if not args.confirm:
+            parser.error("reset-db 是破坏性操作，请同时提供 --confirm")
+        database_path = reset_database(settings)
+        bootstrap = bootstrap_database(settings)
+        print(f"已重置数据库: {database_path}")
+        _print_bootstrap_credentials(bootstrap)
+        return
+    if args.command == "init":
+        init_database(settings)
+    else:
+        bootstrap = bootstrap_database(settings)
+        if args.command == "init-db":
+            print("数据库已初始化。")
+            _print_bootstrap_credentials(bootstrap)
+            return
     factory = build_session_factory(settings)
     db = factory()
     try:
@@ -83,3 +102,12 @@ def main() -> None:
     finally:
         db.close()
     parser.print_help()
+
+
+def _print_bootstrap_credentials(bootstrap) -> None:
+    if bootstrap is None:
+        print("默认管理员账号已存在，未输出密码。")
+        return
+    print(f"默认管理员邮箱: {bootstrap.email}")
+    print(f"默认管理员密码: {bootstrap.password}")
+    print("首次登录后可在账号设置中修改密码。")

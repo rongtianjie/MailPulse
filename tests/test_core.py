@@ -26,9 +26,9 @@ from mailpulse.ai.types import (
     parse_json_text,
 )
 from mailpulse.attachments.converter import MarkItDownAttachmentConverter
-from mailpulse.auth import create_user
+from mailpulse.auth import authenticate, create_user
 from mailpulse.config import Settings, get_settings
-from mailpulse.db import build_session_factory, init_database
+from mailpulse.db import bootstrap_database, build_session_factory, init_database, reset_database
 from mailpulse.delivery import ReportDeliveryService
 from mailpulse.demo import seed_demo
 from mailpulse.filtering import RuleEvaluator, RuleValidationError
@@ -46,6 +46,7 @@ from mailpulse.models import (
     ModelBinding,
     Report,
     Schedule,
+    User,
 )
 from mailpulse.report_service import ReportService
 from mailpulse.reports import render_summary_markdown
@@ -87,6 +88,40 @@ def test_database_initialization_is_alembic_compatible(tmp_path):
     engine = __import__("mailpulse.db", fromlist=["build_engine"]).build_engine(settings)
     assert "alembic_version" in inspect(engine).get_table_names()
     assert engine.connect().exec_driver_sql("select count(*) from users").scalar_one() == 0
+
+
+def test_bootstrap_creates_default_admin_once(tmp_path):
+    settings = make_settings(tmp_path)
+    first = bootstrap_database(settings)
+    assert first is not None
+    assert first.email == "admin@mailpulse.local"
+    assert first.password == "admin123"
+
+    db = build_session_factory(settings)()
+    try:
+        admin = db.query(User).one()
+        assert admin.email == first.email
+        assert admin.role == "admin"
+        assert admin.must_change_password is True
+        assert authenticate(db, first.email, first.password) is admin
+    finally:
+        db.close()
+
+    assert bootstrap_database(settings) is None
+
+
+def test_reset_database_recreates_default_admin(tmp_path):
+    settings = make_settings(tmp_path)
+    bootstrap_database(settings)
+    database_path = settings.data_dir / "mailpulse.sqlite3"
+    assert database_path.exists()
+
+    reset_path = reset_database(settings)
+    assert reset_path == database_path.resolve()
+    assert not database_path.exists()
+    recreated = bootstrap_database(settings)
+    assert recreated is not None
+    assert recreated.email == "admin@mailpulse.local"
 
 
 def test_production_settings_require_explicit_secrets(tmp_path):
@@ -1091,3 +1126,111 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     )
     assert other_client.get(f"/reports/{report_id}").status_code == 404
     assert other_client.get("/admin").status_code == 403
+
+
+def test_default_admin_can_skip_initial_password_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "default-admin-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    client = TestClient(create_app())
+    login_page = client.get("/login")
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    response = client.post(
+        "/login",
+        data={
+            "email": "admin@mailpulse.local",
+            "password": "admin123",
+            "csrf_token": login_token,
+        },
+    )
+    assert response.status_code == 200
+    assert response.url.path == "/admin/account/password"
+    assert "修改管理员密码" in response.text
+    assert "暂时跳过" in response.text
+
+    password_token = re.search(r'name="csrf_token" value="([^"]+)"', response.text).group(1)
+    skipped = client.post(
+        "/admin/account/password/skip",
+        data={"csrf_token": password_token},
+        follow_redirects=False,
+    )
+    assert skipped.status_code == 303
+    assert skipped.headers["location"] == "/admin"
+
+    dashboard = client.get("/admin")
+    logout_token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    client.post("/logout", data={"csrf_token": logout_token})
+    login_page = client.get("/login")
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    logged_in_again = client.post(
+        "/login",
+        data={
+            "email": "admin@mailpulse.local",
+            "password": "admin123",
+            "csrf_token": login_token,
+        },
+    )
+    assert logged_in_again.status_code == 200
+    assert logged_in_again.url.path == "/admin"
+
+
+def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "default-admin-password-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    client = TestClient(create_app())
+    login_page = client.get("/login")
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    response = client.post(
+        "/login",
+        data={
+            "email": "admin@mailpulse.local",
+            "password": "admin123",
+            "csrf_token": login_token,
+        },
+    )
+    password_token = re.search(r'name="csrf_token" value="([^"]+)"', response.text).group(1)
+    changed = client.post(
+        "/admin/account/password",
+        data={
+            "new_password": "admin456",
+            "confirm_password": "admin456",
+            "csrf_token": password_token,
+        },
+        follow_redirects=False,
+    )
+    assert changed.status_code == 303
+    assert changed.headers["location"] == "/admin"
+
+    dashboard = client.get("/admin")
+    logout_token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    client.post("/logout", data={"csrf_token": logout_token})
+    login_page = client.get("/login")
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    old_password = client.post(
+        "/login",
+        data={
+            "email": "admin@mailpulse.local",
+            "password": "admin123",
+            "csrf_token": login_token,
+        },
+    )
+    assert old_password.status_code == 200
+    assert "账号或密码错误" in old_password.text
+
+    login_page = client.get("/login")
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    new_password = client.post(
+        "/login",
+        data={
+            "email": "admin@mailpulse.local",
+            "password": "admin456",
+            "csrf_token": login_token,
+        },
+    )
+    assert new_password.status_code == 200
+    assert new_password.url.path == "/admin"

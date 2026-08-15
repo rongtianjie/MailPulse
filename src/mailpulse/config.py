@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     database_url: str | None = None
     session_cookie: str = "mailpulse_session"
     session_https_only: bool = False
+    default_admin_email: str = "admin@mailpulse.local"
+    default_admin_password: str = Field(default="admin123", min_length=8)
+    default_admin_display_name: str = "系统管理员"
 
     ai_base_url: str | None = None
     ai_api_key: str | None = None

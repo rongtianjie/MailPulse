@@ -32,12 +32,11 @@ cp .env.example .env
 
 ## 3. 初始化与启动
 
-初始化数据库和管理员账号：
+首次启动服务时会自动执行数据库迁移，并在数据库中没有管理员账号时创建默认管理员。默认登录信息为：
 
-```bash
-uv run mailpulse init \
-  --admin-email admin@example.com \
-  --admin-password 'change-this-password'
+```text
+登录邮箱：admin@mailpulse.local
+登录密码：admin123
 ```
 
 启动网页服务：
@@ -46,13 +45,37 @@ uv run mailpulse init \
 uv run mailpulse serve --host 127.0.0.1 --port 8080
 ```
 
+服务仅在首次创建默认管理员时打印登录信息。首次登录后会进入密码设置页面，可以修改密码，也可以暂时跳过。
+
+需要在服务启动前显式初始化时，使用幂等命令：
+
+```bash
+uv run mailpulse init-db
+```
+
+`init` 命令仍可用于显式创建自定义管理员账号：
+
+```bash
+uv run mailpulse init \
+  --admin-email admin@example.com \
+  --admin-password 'change-this-password'
+```
+
+需要重置本地 SQLite 数据库时，必须显式确认：
+
+```bash
+uv run mailpulse reset-db --confirm
+```
+
+执行前应先停止网页服务和后台 worker。该命令只删除数据库及其 `-wal`、`-shm` 文件，然后重新执行初始化；附件、MarkItDown 转换结果和其他运行目录内容会保留。
+
 启动后台 worker：
 
 ```bash
 uv run mailpulse worker
 ```
 
-应用启动和 `init` 命令会执行数据库迁移。需要显式迁移时使用：
+应用启动、`init-db` 和 `init` 命令会执行数据库迁移。需要显式迁移时使用：
 
 ```bash
 uv run alembic upgrade head

@@ -40,12 +40,11 @@ uv run pytest
 cp .env.example .env
 ```
 
-初始化数据库和管理员账号：
+首次启动服务时会自动执行数据库迁移，并在数据库中没有管理员账号时创建默认管理员：
 
-```bash
-uv run mailpulse init \
-  --admin-email admin@example.com \
-  --admin-password 'change-this-password'
+```text
+登录邮箱：admin@mailpulse.local
+登录密码：admin123
 ```
 
 启动网页服务：
@@ -54,11 +53,35 @@ uv run mailpulse init \
 uv run mailpulse serve --host 127.0.0.1 --port 8080
 ```
 
-打开 <http://127.0.0.1:8080> 登录。应用启动和 `init` 命令会自动执行数据库迁移，也可以手动执行：
+服务仅在首次创建默认管理员时打印上述登录信息。首次登录后会进入密码设置页面，可以立即修改，也可以暂时跳过。
+
+如需显式执行初始化，可使用幂等命令：
+
+```bash
+uv run mailpulse init-db
+```
+
+打开 <http://127.0.0.1:8080> 登录。`init-db` 和应用启动都会自动执行数据库迁移，也可以手动执行：
 
 ```bash
 uv run alembic upgrade head
 ```
+
+`init` 命令仍用于显式创建一个自定义管理员账号：
+
+```bash
+uv run mailpulse init \
+  --admin-email admin@example.com \
+  --admin-password 'change-this-password'
+```
+
+需要清空本地 SQLite 数据库并重新创建默认管理员时，必须显式确认：
+
+```bash
+uv run mailpulse reset-db --confirm
+```
+
+执行前应先停止网页服务和后台 worker。该命令只删除数据库及其 SQLite `-wal`、`-shm` 文件，不删除附件、MarkItDown 转换结果和其他运行目录内容。
 
 ## 配置说明
 
