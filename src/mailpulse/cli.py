@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import os
+
+from loguru import logger
 
 from .auth import create_user
 from .config import get_settings
 from .db import bootstrap_database, build_session_factory, init_database, reset_database
 from .demo import seed_demo
+from .logging_config import configure_logging
 from .models import User
 
 
@@ -38,15 +42,28 @@ def main() -> None:
 
     args = parser.parse_args()
     settings = get_settings()
+    configure_logging(settings)
     if args.command == "serve":
         import uvicorn
 
+        host = args.host if args.host is not None else settings.host
+        port = args.port if args.port is not None else settings.port
+        host_source = _configuration_source(settings, "host", "MAILPULSE_HOST", args.host)
+        port_source = _configuration_source(settings, "port", "MAILPULSE_PORT", args.port)
+        logger.info(
+            "MailPulse 服务监听地址: {}:{}（host 来源: {}，port 来源: {}）",
+            host,
+            port,
+            host_source,
+            port_source,
+        )
         uvicorn.run(
             "mailpulse.app:create_app",
-            host=args.host if args.host is not None else settings.host,
-            port=args.port if args.port is not None else settings.port,
+            host=host,
+            port=port,
             reload=args.reload,
             factory=True,
+            log_config=None,
         )
         return
     if args.command == "reset-db":
@@ -54,16 +71,16 @@ def main() -> None:
             parser.error("reset-db 是破坏性操作，请同时提供 --confirm")
         database_path = reset_database(settings)
         bootstrap = bootstrap_database(settings)
-        print(f"已重置数据库: {database_path}")
-        _print_bootstrap_credentials(bootstrap)
+        logger.info("已重置数据库: {}", database_path)
+        _log_bootstrap_credentials(bootstrap)
         return
     if args.command == "init":
         init_database(settings)
     else:
         bootstrap = bootstrap_database(settings)
         if args.command == "init-db":
-            print("数据库已初始化。")
-            _print_bootstrap_credentials(bootstrap)
+            logger.info("数据库已初始化。")
+            _log_bootstrap_credentials(bootstrap)
             return
     factory = build_session_factory(settings)
     db = factory()
@@ -75,13 +92,13 @@ def main() -> None:
             if args.demo:
                 seed_demo(db, user, settings.data_dir)
             db.commit()
-            print(f"已创建管理员: {user.email}")
+            logger.info("已创建管理员: {}", user.email)
             return
         if args.command == "seed-demo":
             user = db.query(User).filter(User.email == args.user_email.strip().lower()).one()
             created = seed_demo(db, user, settings.data_dir)
             db.commit()
-            print(f"已写入演示邮件: {created} 封")
+            logger.info("已写入演示邮件: {} 封", created)
             return
         if args.command == "run-once":
             from .report_service import ReportService
@@ -91,7 +108,7 @@ def main() -> None:
                 user, use_demo_provider=args.demo_ai
             )
             db.commit()
-            print(f"已生成报告: {report.id}")
+            logger.info("已生成报告: {}", report.id)
             return
         if args.command == "worker":
             db.close()
@@ -104,10 +121,21 @@ def main() -> None:
     parser.print_help()
 
 
-def _print_bootstrap_credentials(bootstrap) -> None:
+def _log_bootstrap_credentials(bootstrap) -> None:
+    console_logger = logger.bind(console_only=True)
     if bootstrap is None:
-        print("默认管理员账号已存在，未输出密码。")
+        console_logger.info("默认管理员账号已存在，未输出密码。")
         return
-    print(f"默认管理员邮箱: {bootstrap.email}")
-    print(f"默认管理员密码: {bootstrap.password}")
-    print("首次登录后可在账号设置中修改密码。")
+    console_logger.info("默认管理员邮箱: {}", bootstrap.email)
+    console_logger.info("默认管理员密码: {}", bootstrap.password)
+    console_logger.info("首次登录后可在账号设置中修改密码。")
+
+
+def _configuration_source(settings, field_name: str, env_name: str, command_value) -> str:
+    if command_value is not None:
+        return "命令行"
+    if env_name in os.environ:
+        return "环境变量"
+    if field_name in settings.model_fields_set:
+        return ".env"
+    return "代码默认值"

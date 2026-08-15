@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from loguru import logger
 from sqlalchemy import select
 
 from .config import Settings, get_settings
@@ -18,8 +18,6 @@ from .mail.types import MailboxConnection
 from .models import Delivery, JobRun, Mailbox, Schedule, User
 from .report_service import ReportService
 from .security import decrypt_secret
-
-logger = logging.getLogger("mailpulse.worker")
 
 
 def run_due_schedules(settings: Settings | None = None) -> int:
@@ -37,7 +35,7 @@ def run_due_schedules(settings: Settings | None = None) -> int:
                 completed += int(_run_schedule(session, schedule, now, scheduled_fire, settings))
             except Exception as exc:
                 session.rollback()
-                logger.error("schedule %s failed: %s", schedule.id, type(exc).__name__)
+                logger.error("schedule {} failed: {}", schedule.id, type(exc).__name__)
         return completed
     finally:
         session.close()
@@ -223,7 +221,7 @@ def _run_schedule(
         job.details = {"error_type": type(exc).__name__, "stage": stage}
         job.finished_at = datetime.now(UTC)
         session.commit()
-        logger.error("schedule %s failed at %s: %s", schedule.id, stage, type(exc).__name__)
+        logger.error("schedule {} failed at {}: {}", schedule.id, stage, type(exc).__name__)
         return False
 
 

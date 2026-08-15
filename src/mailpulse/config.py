@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     credential_key: str | None = None
     data_dir: Path = Path("var")
     database_url: str | None = None
+    log_level: str = "INFO"
+    log_rotation: str = "00:00"
+    log_retention: str = "30 days"
     session_cookie: str = "mailpulse_session"
     session_https_only: bool = False
     default_admin_email: str = "admin@mailpulse.local"
@@ -77,6 +80,12 @@ class Settings(BaseSettings):
     @property
     def conversions_dir(self) -> Path:
         path = self.data_dir / "conversions"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def logs_dir(self) -> Path:
+        path = self.data_dir / "logs"
         path.mkdir(parents=True, exist_ok=True)
         return path
 

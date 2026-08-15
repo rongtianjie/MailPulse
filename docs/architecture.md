@@ -2,7 +2,7 @@
 
 ## 1. 组件关系
 
-MailPulse 是一个 Python 单体应用，由网页服务、后台 worker、SQLite 数据库和外部邮箱/模型服务组成。
+MailPulse 是一个 Python 单体应用，由网页服务、后台 worker、SQLite 数据库、Loguru 日志系统和外部邮箱/模型服务组成。
 
 ```text
 Web UI ────────┐
@@ -12,7 +12,8 @@ Worker ────────┘
     ├─ IMAP：只读同步邮件
     ├─ MarkItDown：转换附件
     ├─ AI Provider：生成结构化内容
-    └─ SMTP：投递报告
+    ├─ SMTP：投递报告
+    └─ Loguru：控制台与文件日志
 ```
 
 正式源代码位于 `src/mailpulse/`，网页模板位于 `src/mailpulse/templates/`，本地样式和脚本位于 `src/mailpulse/static/`。

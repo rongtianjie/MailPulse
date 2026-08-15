@@ -143,6 +143,7 @@ def _alembic_config(settings: Settings) -> AlembicConfig:
     config = AlembicConfig(str(config_path))
     config.set_main_option("sqlalchemy.url", settings.resolved_database_url)
     config.attributes["mailpulse_settings"] = settings
+    config.attributes["logging_configured"] = True
     return config
 
 

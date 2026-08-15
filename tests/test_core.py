@@ -79,15 +79,20 @@ def test_password_and_credential_round_trip(tmp_path):
     assert not verify_password("wrong-password", password_hash)
 
 
-def test_serve_uses_settings_and_allows_cli_overrides(monkeypatch):
+def test_serve_uses_settings_and_allows_cli_overrides(monkeypatch, capsys, tmp_path):
     calls = []
-    monkeypatch.setattr(cli, "get_settings", lambda: Settings(host="0.0.0.0", port=9090))
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(host="0.0.0.0", port=9090, data_dir=tmp_path),
+    )
     monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append((args, kwargs)))
 
     monkeypatch.setattr(sys, "argv", ["mailpulse", "serve"])
     cli.main()
     assert calls[-1][1]["host"] == "0.0.0.0"
     assert calls[-1][1]["port"] == 9090
+    assert "MailPulse 服务监听地址: 0.0.0.0:9090" in capsys.readouterr().out
 
     monkeypatch.setattr(
         sys, "argv", ["mailpulse", "serve", "--host", "127.0.0.1", "--port", "8081"]
@@ -95,6 +100,10 @@ def test_serve_uses_settings_and_allows_cli_overrides(monkeypatch):
     cli.main()
     assert calls[-1][1]["host"] == "127.0.0.1"
     assert calls[-1][1]["port"] == 8081
+    output = capsys.readouterr().out
+    assert "MailPulse 服务监听地址: 127.0.0.1:8081" in output
+    assert "host 来源: 命令行" in output
+    assert "port 来源: 命令行" in output
 
 
 def test_parse_json_text_accepts_singleton_object_array_from_compatible_server():

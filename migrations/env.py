@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from logging.config import fileConfig
-
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from mailpulse import models  # noqa: F401
 from mailpulse.config import get_settings
 from mailpulse.db import Base
+from mailpulse.logging_config import configure_logging
 
 config = context.config
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
 settings = config.attributes.get("mailpulse_settings") or get_settings()
+if not config.attributes.get("logging_configured"):
+    configure_logging(settings)
 x_args = context.get_x_argument(as_dictionary=True)
 database_url = x_args.get("db_url") or settings.resolved_database_url
 config.set_main_option("sqlalchemy.url", database_url)

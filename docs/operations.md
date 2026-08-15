@@ -30,6 +30,8 @@ cp .env.example .env
 
 两个密钥应使用不同的随机值。`.env` 不得提交到版本库。
 
+日志默认输出到控制台，并写入 `var/logs/mailpulse.log`，每天零点轮转。可通过 `MAILPULSE_LOG_LEVEL`、`MAILPULSE_LOG_ROTATION` 和 `MAILPULSE_LOG_RETENTION` 调整级别、轮转时间和保留策略。默认管理员密码仅输出到控制台，不写入日志文件。
+
 ## 3. 初始化与启动
 
 首次启动服务时会自动执行数据库迁移，并在数据库中没有管理员账号时创建默认管理员。默认登录信息为：
@@ -48,6 +50,7 @@ uv run mailpulse serve
 服务仅在首次创建默认管理员时打印登录信息。首次登录后会进入密码设置页面，可以修改密码，也可以暂时跳过。
 
 `serve` 默认读取 `.env` 中的 `MAILPULSE_HOST` 和 `MAILPULSE_PORT`；命令行提供的 `--host` 或 `--port` 会临时覆盖对应配置。
+启动日志会输出实际使用的监听地址，以及 host/port 的配置来源（命令行、`.env`、环境变量或代码默认值）。
 
 需要在服务启动前显式初始化时，使用幂等命令：
 

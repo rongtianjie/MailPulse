@@ -12,6 +12,7 @@ MailPulse 是面向公司内网的多用户邮件归纳整理工具。系统通�
 - 附件通过内置 MarkItDown 转换为 Markdown 和图片资源后进入模型流程。
 - 报告网页查看、SMTP 投递、失败重试和运行记录。
 - 本地 SQLite 数据库、CSRF 防护、登录限流和凭据加密。
+- Loguru 统一日志输出、文件轮转和保留策略。
 
 ## 功能界面
 
@@ -55,6 +56,8 @@ uv run mailpulse serve
 
 服务仅在首次创建默认管理员时打印上述登录信息。首次登录后会进入密码设置页面，可以立即修改，也可以暂时跳过。
 
+启动日志会输出实际使用的监听地址，以及 host/port 的配置来源（命令行、`.env`、环境变量或代码默认值）。
+
 如需临时覆盖 `.env` 中的监听配置，可使用 `--host` 和 `--port` 参数。
 
 如需显式执行初始化，可使用幂等命令：
@@ -63,7 +66,7 @@ uv run mailpulse serve
 uv run mailpulse init-db
 ```
 
-打开 [http://127.0.0.1:8080](http://127.0.0.1:8080) 登录。`init-db` 和应用启动都会自动执行数据库迁移，也可以手动执行：
+打开启动日志中显示的地址（默认 [http://127.0.0.1:8080](http://127.0.0.1:8080)）登录。`init-db` 和应用启动都会自动执行数据库迁移，也可以手动执行：
 
 ```bash
 uv run alembic upgrade head
@@ -92,8 +95,11 @@ uv run mailpulse reset-db --confirm
 - `MAILPULSE_SECRET_KEY`：Session 加密密钥。
 - `MAILPULSE_CREDENTIAL_KEY`：邮箱和模型凭据加密密钥。
 - `MAILPULSE_DATA_DIR`：SQLite、附件、转换结果和日志的存储目录。
+- `MAILPULSE_LOG_LEVEL`：控制台和文件日志级别，默认 `INFO`。
+- `MAILPULSE_LOG_ROTATION` / `MAILPULSE_LOG_RETENTION`：日志轮转时间和保留时间，默认每天零点轮转。
 
 生产环境应使用独立的随机密钥，并确保运行目录仅对应用账号可读写。密钥、邮箱密码和 AI API Key 不得提交到版本库。
+日志默认输出到控制台并写入 `var/logs/mailpulse.log`，按配置自动轮转和清理。默认管理员密码仅输出到控制台，不写入日志文件。
 
 ## AI 模型配置
 
