@@ -32,9 +32,9 @@ from mailpulse.db import build_session_factory, init_database
 from mailpulse.delivery import ReportDeliveryService
 from mailpulse.demo import seed_demo
 from mailpulse.filtering import RuleEvaluator, RuleValidationError
-from mailpulse.mail.connectors import FakeMailConnector
+from mailpulse.mail.connectors import FakeMailConnector, IMAPConnector
 from mailpulse.mail.sync import MailSyncService
-from mailpulse.mail.types import RawAttachment, RawMessage
+from mailpulse.mail.types import MailboxConnection, RawAttachment, RawMessage
 from mailpulse.models import (
     AIProviderProfile,
     Attachment,
@@ -42,6 +42,7 @@ from mailpulse.models import (
     CanonicalMessage,
     JobRun,
     Mailbox,
+    MessageOccurrence,
     ModelBinding,
     Report,
     Schedule,
@@ -186,6 +187,124 @@ def test_uidvalidity_change_does_not_duplicate_canonical_message(tmp_path):
             ).count()
             == 1
         )
+    finally:
+        db.close()
+
+
+def test_sync_deduplicates_identical_messages_in_one_batch(tmp_path):
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "batch-dedup@example.com", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address=user.email,
+            imap_host="fake",
+            username=user.email,
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        raw = RawMessage(
+            message_id="<batch-dedup@example.com>",
+            subject="批次内重复邮件",
+            sender="sender@example.com",
+            recipients=[user.email],
+            cc=[],
+            received_at=datetime.now(UTC),
+            body_text="相同正文",
+            thread_key=None,
+        )
+        result = MailSyncService(db, settings).sync(
+            mailbox, FakeMailConnector([raw, raw])
+        )
+        db.commit()
+        assert result.created == 1
+        assert result.linked == 1
+        assert db.query(CanonicalMessage).count() == 1
+        assert db.query(MessageOccurrence).count() == 2
+    finally:
+        db.close()
+
+
+def test_imap_batch_fetch_ignores_trailing_marker(monkeypatch):
+    raw = (
+        b"From: sender@example.com\n"
+        b"To: user@example.com\n"
+        b"Subject: Batch fetch\n"
+        b"Message-ID: <batch-fetch@example.com>\n"
+        b"Date: Thu, 14 Aug 2026 12:00:00 +0000\n"
+        b"\nBody"
+    )
+
+    class FakeIMAPClient:
+        def response(self, key):
+            assert key == "UIDVALIDITY"
+            return "OK", [b"7"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                return "OK", [b"1"]
+            assert command == "FETCH"
+            return "OK", [(b"1 (UID 1 BODY[] {5})", raw), b")"]
+
+        def logout(self):
+            return "BYE", []
+
+    connector = IMAPConnector(
+        MailboxConnection(
+            host="fake",
+            port=993,
+            username="user@example.com",
+            password="secret",
+            tls=True,
+            folder="INBOX",
+        )
+    )
+    monkeypatch.setattr(connector, "_open", lambda: FakeIMAPClient())
+    result = connector.sync_messages()
+    assert result.cursor.last_uid == 1
+    assert len(result.messages) == 1
+    assert result.messages[0][0] == 1
+
+
+def test_search_count_applies_status_filter_with_fts(tmp_path):
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "search-status@example.com", "password-123")
+        messages = [
+            CanonicalMessage(
+                owner_user_id=user.id,
+                content_hash="status-search-1",
+                subject="重要状态通知",
+                sender="sender@example.com",
+                recipients=[user.email],
+                cc=[],
+                body_text="需要处理",
+                local_starred=False,
+            ),
+            CanonicalMessage(
+                owner_user_id=user.id,
+                content_hash="status-search-2",
+                subject="重要状态通知",
+                sender="sender@example.com",
+                recipients=[user.email],
+                cc=[],
+                body_text="已经加星",
+                local_starred=True,
+            ),
+        ]
+        db.add_all(messages)
+        db.flush()
+        service = SearchService(db)
+        for message in messages:
+            service.index_message(message)
+        assert service.count(user.id, "重要状态通知") == 2
+        assert service.count(user.id, "重要状态通知", status="starred") == 1
+        assert len(service.search(user.id, "重要状态通知", status="starred")) == 1
     finally:
         db.close()
 

@@ -147,6 +147,11 @@ class MailSyncService:
             self.session.add(canonical)
             self.session.flush()
             SearchService(self.session).index_message(canonical)
+        # Keep the in-memory lookup cache current so duplicate messages in the
+        # same IMAP batch share this canonical row instead of creating another.
+        if normalized_id:
+            existing["by_message_id"][normalized_id] = canonical
+        existing["by_content_hash"][content_hash] = canonical
         occurrence = MessageOccurrence(
             message_id=canonical.id,
             mailbox_id=mailbox.id,
@@ -156,6 +161,7 @@ class MailSyncService:
             internal_date=raw.received_at,
         )
         self.session.add(occurrence)
+        existing["existing_uids"].add(uid)
         if is_new:
             self._store_attachments(canonical, raw, storage_state)
         return is_new

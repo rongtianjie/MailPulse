@@ -111,7 +111,10 @@ class SearchService:
     def count(self, owner_user_id: int, query: str = "", status: str = "") -> int:
         """Total matches for pagination; mirrors search() filtering semantics."""
         query = query.strip()
-        if query and self._use_fts(query):
+        # FTS rows do not contain the local status flags. Use the canonical
+        # table fallback whenever a status filter is active so the count and
+        # paginated result set remain consistent.
+        if query and not status and self._use_fts(query):
             try:
                 with self.session.begin_nested():
                     total = self.session.execute(

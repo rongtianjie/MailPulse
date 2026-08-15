@@ -165,7 +165,12 @@ class IMAPConnector:
                 )
                 if status != "OK":
                     continue
-                for header, payload in fetched:
+                # imaplib returns a trailing non-tuple marker such as b")" for
+                # BODY fetches. Only tuple entries carry a message payload.
+                for item in fetched:
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+                    header, payload = item
                     if not isinstance(header, bytes) or not isinstance(payload, bytes):
                         continue
                     uid = _fetch_uid(header)
