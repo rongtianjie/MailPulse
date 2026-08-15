@@ -919,29 +919,37 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     app = create_app()
     settings = get_settings()
     db = build_session_factory(settings)()
-    user = create_user(db, "web@example.com", "password-123", role="admin")
+    admin = create_user(db, "admin@example.com", "password-123", role="admin")
+    user = create_user(db, "web@example.com", "password-123")
     db.commit()
     db.close()
-    client = TestClient(app)
-    page = client.get("/login")
+    admin_client = TestClient(app)
+    page = admin_client.get("/login")
     token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
-    response = client.post(
+    response = admin_client.post(
         "/login",
-        data={"email": user.email, "password": "password-123", "csrf_token": token},
+        data={"email": admin.email, "password": "password-123", "csrf_token": token},
     )
     assert response.status_code == 200
-    assert "快速开始" in response.text
-    assert "载入演示数据" not in response.text
-    assert "生成演示报告" not in response.text
-    assert "当前可使用演示 Provider" not in response.text
-    assert "生成报告" in response.text
-    assert client.post("/demo/seed", data={}).status_code == 403
-    dashboard = client.get("/")
-    token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
-    admin_page = client.get("/admin")
-    assert admin_page.status_code == 200
-    admin_token = re.search(r'name="csrf_token" value="([^"]+)"', admin_page.text).group(1)
-    created_user_response = client.post(
+    assert "系统概览" in response.text
+    assert 'href="/messages"' not in response.text
+    assert 'href="/reports"' not in response.text
+    assert "生成报告" not in response.text
+    assert admin_client.get("/").status_code == 403
+    for user_path in [
+        "/settings",
+        "/schedules",
+        "/rules",
+        "/messages",
+        "/reports",
+    ]:
+        assert admin_client.get(user_path).status_code == 403
+    assert admin_client.get("/admin/users").status_code == 200
+    assert admin_client.get("/admin/models").status_code == 200
+    assert admin_client.get("/admin/jobs").status_code == 200
+    admin_users_page = admin_client.get("/admin/users")
+    admin_token = re.search(r'name="csrf_token" value="([^"]+)"', admin_users_page.text).group(1)
+    created_user_response = admin_client.post(
         "/admin/users",
         data={
             "email": "managed@example.com",
@@ -953,10 +961,11 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         follow_redirects=False,
     )
     assert created_user_response.status_code == 303
-    assert "managed@example.com" in client.get("/admin").text
-    model_page = client.get("/admin")
+    assert created_user_response.headers["location"] == "/admin/users"
+    assert "managed@example.com" in admin_client.get("/admin/users").text
+    model_page = admin_client.get("/admin/models")
     model_token = re.search(r'name="csrf_token" value="([^"]+)"', model_page.text).group(1)
-    model_response = client.post(
+    model_response = admin_client.post(
         "/admin/models",
         data={
             "name": "本地主模型",
@@ -984,21 +993,36 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         assert saved_profile.policy["max_image_bytes"] == 6 * 1024 * 1024
     finally:
         model_db.close()
-    assert client.post("/demo/seed", data={"csrf_token": token}).status_code == 200
+    assert model_response.headers["location"] == "/admin/models"
+    user_client = TestClient(app)
+    user_login = user_client.get("/login")
+    user_token = re.search(r'name="csrf_token" value="([^"]+)"', user_login.text).group(1)
+    user_response = user_client.post(
+        "/login",
+        data={"email": user.email, "password": "password-123", "csrf_token": user_token},
+    )
+    assert user_response.status_code == 200
+    assert "快速开始" in user_response.text
+    assert 'href="/admin"' not in user_response.text
+    for admin_path in ["/admin", "/admin/users", "/admin/models", "/admin/jobs"]:
+        assert user_client.get(admin_path).status_code == 403
+    dashboard = user_client.get("/")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    assert user_client.post("/demo/seed", data={"csrf_token": token}).status_code == 200
     monkeypatch.setattr("mailpulse.web.routes.IMAPConnector.test_connection", lambda self: None)
-    settings_page = client.get("/settings")
+    settings_page = user_client.get("/settings")
     settings_token = re.search(r'name="csrf_token" value="([^"]+)"', settings_page.text).group(1)
-    tested_settings = client.post("/settings/test", data={"csrf_token": settings_token})
+    tested_settings = user_client.post("/settings/test", data={"csrf_token": settings_token})
     assert tested_settings.status_code == 200
     assert "IMAP 连接验证成功" in tested_settings.text
     assert "测试 IMAP 连接" not in tested_settings.text
-    messages_page = client.get("/messages")
+    messages_page = user_client.get("/messages")
     message_db = build_session_factory(settings)()
     message_id = message_db.query(CanonicalMessage).order_by(CanonicalMessage.id).first().id
     message_db.close()
     message_token = re.search(r'name="csrf_token" value="([^"]+)"', messages_page.text).group(1)
     assert (
-        client.post(
+        user_client.post(
             f"/messages/{message_id}/toggle-processed",
             data={"csrf_token": message_token},
         ).status_code
@@ -1009,26 +1033,26 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         assert verify_message_db.get(CanonicalMessage, message_id).local_processed is True
     finally:
         verify_message_db.close()
-    dashboard = client.get("/")
+    dashboard = user_client.get("/")
     token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
-    report_response = client.post(
+    report_response = user_client.post(
         "/reports/generate",
         data={"use_demo_provider": "true", "csrf_token": token},
     )
     assert report_response.status_code == 200
-    reports_page_text = client.get("/reports").text
+    reports_page_text = user_client.get("/reports").text
     assert "生成报告" in reports_page_text
     assert "生成演示报告" not in reports_page_text
-    report_detail_page = client.get("/reports/1")
+    report_detail_page = user_client.get("/reports/1")
     assert report_detail_page.status_code == 200
     assert '"used_vision": false' in report_detail_page.text
-    schedules_page = client.get("/schedules")
+    schedules_page = user_client.get("/schedules")
     assert schedules_page.status_code == 200
     token = re.search(r'name="csrf_token" value="([^"]+)"', schedules_page.text).group(1)
     schedule_db = build_session_factory(settings)()
     mailbox = schedule_db.query(Mailbox).filter(Mailbox.user_id == user.id).one()
     schedule_db.close()
-    schedule_response = client.post(
+    schedule_response = user_client.post(
         "/schedules",
         data={
             "name": "工作日邮件报告",

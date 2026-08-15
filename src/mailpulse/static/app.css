@@ -90,6 +90,15 @@ nav a:hover { color: var(--accent-dark); background: var(--accent-soft); }
 nav a.active { color: var(--accent-dark); background: var(--accent-soft); font-weight: 600; }
 
 .session-actions { flex: 0 0 auto; }
+.session-user {
+  flex: 0 1 auto;
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .link-button {
   min-height: 32px;
   padding: 6px 9px;
@@ -104,6 +113,63 @@ nav a.active { color: var(--accent-dark); background: var(--accent-soft); font-w
 .link-button:hover { color: var(--accent-dark); background: var(--accent-soft); }
 .link-button.danger { color: var(--danger); }
 .link-button.danger:hover { color: var(--danger); background: var(--danger-soft); }
+
+.admin-mode .admin-topbar {
+  background: var(--ink);
+  border-bottom-color: #2b3650;
+}
+.admin-mode .admin-brand,
+.admin-mode .admin-topbar .session-user,
+.admin-mode .admin-topbar .link-button,
+.admin-mode .admin-nav a { color: #dbe3f2; }
+.admin-mode .admin-brand span {
+  margin-left: 5px;
+  color: #9eafe0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.admin-mode .admin-nav a:hover,
+.admin-mode .admin-nav a.active { color: #fff; background: #2a385e; }
+.admin-mode .admin-topbar .link-button:hover { color: #fff; background: #2a385e; }
+.admin-stats { grid-template-columns: repeat(3, 1fr); }
+.admin-stats small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.admin-link-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  color: inherit;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.admin-link-card:hover {
+  color: inherit;
+  border-color: #aeb9d8;
+  box-shadow: 0 12px 28px rgba(30, 45, 80, .1);
+  transform: translateY(-1px);
+}
+.admin-link-card h2 { margin-bottom: 8px; }
+.admin-link-card p { margin-bottom: 16px; }
+.admin-card-icon {
+  display: inline-flex;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .04em;
+}
+.admin-note-card { border-left: 3px solid var(--accent); }
 
 .container {
   width: min(1120px, 90vw);
@@ -478,6 +544,7 @@ pre { margin: 0; }
 @media (max-width: 760px) {
   .topbar { gap: 10px; padding: 8px 5vw; }
   .brand { font-size: 18px; }
+  .session-user { display: none; }
   nav { gap: 1px; }
   nav a { padding: 7px 8px; font-size: 13px; }
   .container { width: min(92vw, 1120px); padding-top: 28px; }

@@ -1,0 +1,6 @@
+{% extends "admin_base.html" %}
+{% block title %}任务监控 - MailPulse{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">平台运行状态</p><h1>任务监控</h1><p class="muted">仅展示任务状态、时间和错误元数据，不展示用户邮件正文或报告内容。</p></div></div>
+<section class="card"><div class="section-heading"><h2>最近运行记录</h2><span class="muted">最多显示 100 条</span></div>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span><strong>{{ job.stage }}</strong><small>{{ job.run_key }} · 开始 {{ job.started_at | fmt_time }}{% if job.finished_at %} · 结束 {{ job.finished_at | fmt_time }}{% endif %}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</section>
+{% endblock %}

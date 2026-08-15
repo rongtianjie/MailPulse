@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "user_base.html" %}
 {% block title %}报告 - MailPulse{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">归纳结果</p><h1>报告</h1></div><form method="post" action="/reports/generate" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="primary" type="submit" data-processing-label="生成中…">生成报告</button></form></div>

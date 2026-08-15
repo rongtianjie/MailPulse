@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "user_base.html" %}
 {% block title %}{{ report.title }} - MailPulse{% endblock %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</p></div><span class="tag {{ report.status }}">{{ report.status }}</span></div>

@@ -91,9 +91,13 @@ def _build_imap_connector(mailbox: Mailbox, settings) -> IMAPConnector:
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    if request.session.get("user_id"):
-        return RedirectResponse("/", status_code=303)
+def login_page(request: Request, db: Session = Depends(get_db)):
+    user_id = request.session.get("user_id")
+    if user_id:
+        user = db.get(User, int(user_id))
+        if user and user.is_active:
+            return RedirectResponse("/admin" if user.role == "admin" else "/", status_code=303)
+        request.session.clear()
     return _render(request, "login.html", error=None)
 
 
@@ -121,7 +125,7 @@ def login(
         AuditLog(actor_user_id=user.id, action="login", target_type="user", target_id=str(user.id))
     )
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/admin" if user.role == "admin" else "/", status_code=303)
 
 
 @router.post("/logout")
@@ -1075,10 +1079,48 @@ def delete_message_label(
 
 @router.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    return _render_admin_page(request, user, db, error=None)
+    users = list(db.scalars(select(User).order_by(User.created_at.desc())))
+    profiles = list(
+        db.scalars(select(AIProviderProfile).order_by(AIProviderProfile.created_at.desc()))
+    )
+    jobs = list(db.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(5)))
+    return _render(
+        request,
+        "admin.html",
+        user=user,
+        users_count=len(users),
+        active_users_count=sum(item.is_active for item in users),
+        profiles_count=len(profiles),
+        enabled_profiles_count=sum(item.is_enabled for item in profiles),
+        jobs=jobs,
+    )
 
 
-def _render_admin_page(
+@router.get("/admin/users", response_class=HTMLResponse)
+def admin_users_page(
+    request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)
+):
+    return _render_admin_users_page(request, user, db, error=None)
+
+
+def _render_admin_users_page(
+    request: Request,
+    user: User,
+    db: Session,
+    error: str | None,
+):
+    users = list(db.scalars(select(User).order_by(User.created_at.desc())))
+    return _render(request, "admin_users.html", user=user, users=users, error=error)
+
+
+@router.get("/admin/models", response_class=HTMLResponse)
+def admin_models_page(
+    request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)
+):
+    return _render_admin_models_page(request, user, db, error=None)
+
+
+def _render_admin_models_page(
     request: Request,
     user: User,
     db: Session,
@@ -1086,8 +1128,6 @@ def _render_admin_page(
     editing_profile: AIProviderProfile | None = None,
     model_form: dict | None = None,
 ):
-    users = list(db.scalars(select(User).order_by(User.created_at.desc())))
-    jobs = list(db.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(20)))
     profiles = list(
         db.scalars(select(AIProviderProfile).order_by(AIProviderProfile.created_at.desc()))
     )
@@ -1095,15 +1135,21 @@ def _render_admin_page(
         model_form = _model_form_defaults(editing_profile, db)
     return _render(
         request,
-        "admin.html",
+        "admin_models.html",
         user=user,
-        users=users,
-        jobs=jobs,
         profiles=profiles,
         error=error,
         editing_profile=editing_profile,
         model_form=model_form,
     )
+
+
+@router.get("/admin/jobs", response_class=HTMLResponse)
+def admin_jobs_page(
+    request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)
+):
+    jobs = list(db.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(100)))
+    return _render(request, "admin_jobs.html", user=user, jobs=jobs)
 
 
 def _validate_model_form(
@@ -1224,8 +1270,8 @@ def create_managed_user(
         db.commit()
     except ValueError as exc:
         db.rollback()
-        return _render_admin_page(request, user, db, error=f"账号创建失败：{exc}")
-    return RedirectResponse("/admin", status_code=303)
+        return _render_admin_users_page(request, user, db, error=f"账号创建失败：{exc}")
+    return RedirectResponse("/admin/users", status_code=303)
 
 
 @router.post("/admin/models")
@@ -1259,7 +1305,9 @@ def create_model_profile(
             timeout_seconds, max_retries, max_input_chars, max_output_tokens,
             max_images, max_image_size_mb,
         )
-        return _render_admin_page(request, user, db, error=validation_error, model_form=model_form)
+        return _render_admin_models_page(
+            request, user, db, error=validation_error, model_form=model_form
+        )
     profile = AIProviderProfile(
         owner_user_id=None,
         name=name.strip(),
@@ -1285,7 +1333,7 @@ def create_model_profile(
     db.flush()
     db.add(ModelBinding(role=role, provider_profile_id=profile.id))
     db.commit()
-    return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse("/admin/models", status_code=303)
 
 
 @router.get("/admin/models/{profile_id}/edit", response_class=HTMLResponse)
@@ -1298,7 +1346,7 @@ def edit_model_profile_page(
     profile = db.get(AIProviderProfile, profile_id)
     if profile is None:
         return HTMLResponse("模型配置不存在", status_code=404)
-    return _render_admin_page(request, user, db, error=None, editing_profile=profile)
+    return _render_admin_models_page(request, user, db, error=None, editing_profile=profile)
 
 
 @router.post("/admin/models/{profile_id}/edit")
@@ -1336,7 +1384,7 @@ def update_model_profile(
             timeout_seconds, max_retries, max_input_chars, max_output_tokens,
             max_images, max_image_size_mb,
         )
-        return _render_admin_page(
+        return _render_admin_models_page(
             request, user, db, error=validation_error,
             editing_profile=profile, model_form=model_form,
         )
@@ -1369,7 +1417,7 @@ def update_model_profile(
     else:
         binding.role = role
     db.commit()
-    return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse("/admin/models", status_code=303)
 
 
 @router.post("/admin/models/{profile_id}/toggle")
@@ -1386,7 +1434,7 @@ def toggle_model_profile(
         return HTMLResponse("模型配置不存在", status_code=404)
     profile.is_enabled = not profile.is_enabled
     db.commit()
-    return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse("/admin/models", status_code=303)
 
 
 @router.post("/admin/models/{profile_id}/delete")
@@ -1403,7 +1451,7 @@ def delete_model_profile(
         return HTMLResponse("模型配置不存在", status_code=404)
     db.delete(profile)
     db.commit()
-    return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse("/admin/models", status_code=303)
 
 
 @router.post("/admin/users/{user_id}/toggle")
@@ -1419,7 +1467,7 @@ def toggle_user_active(
     if target is None:
         return HTMLResponse("账号不存在", status_code=404)
     if target.id == user.id:
-        return _render_admin_page(request, user, db, error="不能停用自己的账号")
+        return _render_admin_users_page(request, user, db, error="不能停用自己的账号")
     target.is_active = not target.is_active
     db.commit()
-    return RedirectResponse("/admin", status_code=303)
+    return RedirectResponse("/admin/users", status_code=303)

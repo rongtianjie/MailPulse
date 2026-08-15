@@ -17,7 +17,7 @@ def get_db() -> Generator[Session, None, None]:
         session.close()
 
 
-def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+def authenticated_user(request: Request, db: Session = Depends(get_db)) -> User:
     user_id = request.session.get("user_id")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
@@ -28,7 +28,16 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
-def admin_user(user: User = Depends(current_user)) -> User:
+def current_user(user: User = Depends(authenticated_user)) -> User:
+    """Return a regular user for the user-facing application routes."""
+    if user.role != "user":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="管理员账号不能访问用户工作台"
+        )
+    return user
+
+
+def admin_user(user: User = Depends(authenticated_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
