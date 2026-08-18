@@ -8,6 +8,10 @@ document.addEventListener(
   (event) => {
     const button = event.target.closest("button[type='submit']");
     if (!button || button.disabled) return;
+    if (button.dataset.confirmDelete && !window.confirm(`确定删除任务「${button.dataset.confirmDelete}」？其筛选规则和投递渠道将一并删除。`)) {
+      event.preventDefault();
+      return;
+    }
     const form = button.form;
     if (!form || !form.dataset.disableOnSubmit) return;
     button.disabled = true;
@@ -173,13 +177,18 @@ function definitionToConditions(definition) {
 function setupWizard(form) {
   const steps = [...form.querySelectorAll(".wizard-step")];
   const indicators = [...form.querySelectorAll(".wizard-steps li")];
-  let current = 0;
+  let current = Math.max(
+    0,
+    Math.min(steps.length - 1, Number(form.dataset.activeStep || 1) - 1),
+  );
   const showStep = (index) => {
     current = Math.max(0, Math.min(steps.length - 1, index));
     steps.forEach((step, i) => step.classList.toggle("active", i === current));
     indicators.forEach((indicator, i) => {
       indicator.classList.toggle("active", i === current);
       indicator.classList.toggle("done", i < current);
+      if (i === current) indicator.setAttribute("aria-current", "step");
+      else indicator.removeAttribute("aria-current");
     });
   };
   form.querySelectorAll("[data-next]").forEach((button) => {
@@ -198,7 +207,7 @@ function setupWizard(form) {
   form.querySelectorAll("[data-prev]").forEach((button) => {
     button.addEventListener("click", () => showStep(current - 1));
   });
-  showStep(0);
+  showStep(current);
 
   const list = form.querySelector("[data-rule-list]");
   if (list) {
@@ -212,6 +221,11 @@ function setupWizard(form) {
   const targetInput = form.querySelector("#target-input");
   const targetList = form.querySelector("[data-target-list]");
   const addTarget = form.querySelector("[data-add-target]");
+  if (targetList) {
+    targetList.querySelectorAll("[data-remove-target]").forEach((button) => {
+      button.addEventListener("click", () => button.closest("[data-email]")?.remove());
+    });
+  }
   if (targetInput && targetList && addTarget) {
     const appendTarget = (email) => {
       const item = document.createElement("li");
@@ -241,6 +255,41 @@ function setupWizard(form) {
       appendTarget(email);
       targetInput.value = "";
     });
+  }
+
+  const copySelect = form.querySelector("[name='copy_from']");
+  const passwordInput = form.querySelector("[name='password']");
+  const applyCopiedMailbox = () => {
+    if (!copySelect) return;
+    const option = copySelect.selectedOptions[0];
+    const copied = option && option.value;
+    const setValue = (name, value) => {
+      const field = form.querySelector(`[name='${name}']`);
+      if (field && value !== undefined) field.value = value;
+    };
+    if (copied) {
+      setValue("mailbox_name", option.dataset.mailboxName);
+      setValue("email_address", option.dataset.mailboxEmail);
+      setValue("imap_host", option.dataset.imapHost);
+      setValue("imap_port", option.dataset.imapPort);
+      setValue("imap_tls", option.dataset.imapTls);
+      setValue("username", option.dataset.mailboxUsername);
+      setValue("folder", option.dataset.mailboxFolder);
+      setValue("smtp_host", option.dataset.smtpHost);
+      setValue("smtp_port", option.dataset.smtpPort);
+      setValue("smtp_tls", option.dataset.smtpTls);
+      if (passwordInput) {
+        passwordInput.required = false;
+        passwordInput.placeholder = "复制已有邮箱，可留空表示沿用已加密凭据";
+      }
+    } else if (passwordInput) {
+      passwordInput.required = true;
+      passwordInput.placeholder = "首次配置必须填写";
+    }
+  };
+  if (copySelect) {
+    copySelect.addEventListener("change", applyCopiedMailbox);
+    applyCopiedMailbox();
   }
 
   form.addEventListener("submit", () => {
@@ -312,7 +361,102 @@ function setupRuleEditor(form) {
   });
 }
 
+function setupRunMonitor(panel) {
+  const endpoint = panel.dataset.endpoint;
+  if (!endpoint) return;
+  const reloadOnTerminal = panel.dataset.reloadOnTerminal === "true";
+  const status = panel.querySelector("[data-run-status]");
+  const statusLabel = panel.querySelector("[data-run-status-label]");
+  const stageLabel = panel.querySelector("[data-run-stage-label]");
+  const error = panel.querySelector("[data-run-error]");
+  const summary = panel.querySelector("[data-run-summary]");
+  const events = panel.querySelector("[data-run-events]");
+  const statusLabels = { queued: "等待运行", running: "运行中", success: "运行成功", failed: "运行失败", canceled: "已取消" };
+  const stageLabels = { sync: "同步邮件", attachments: "附件处理", summarize: "AI 归纳", delivery: "投递报告", complete: "完成" };
+  const summaryLabels = {
+    fetched: "同步读取", created: "新增邮件", linked: "已关联", attachments: "附件数",
+    matched_message_count: "规则命中", message_count: "纳入报告", delivery_status: "投递状态",
+  };
+  let previousStatus = null;
+  const render = (payload) => {
+    if (status) {
+      status.textContent = statusLabels[payload.status] || payload.status;
+      status.className = `tag ${payload.status === "success" ? "success" : (["failed", "canceled"].includes(payload.status) ? "failed" : (payload.status === "running" ? "running" : "pending"))}`;
+    }
+    if (statusLabel) statusLabel.textContent = statusLabels[payload.status] || payload.status;
+    if (stageLabel) stageLabel.textContent = `阶段：${stageLabels[payload.stage] || payload.stage}`;
+    if (error) error.textContent = payload.error_message || "";
+    if (summary) {
+      const values = Object.entries(payload.summary || {})
+        .filter(([key, value]) => value !== null && value !== undefined && key !== "vision_error")
+        .map(([key, value]) => `${summaryLabels[key] || key}：${typeof value === "boolean" ? (value ? "是" : "否") : value}`);
+      summary.textContent = values.join(" · ");
+    }
+    if (events) {
+      events.replaceChildren();
+      (payload.events || []).forEach((item) => {
+        const li = document.createElement("li");
+        li.className = `run-log-event ${item.level || "info"}`;
+        const time = document.createElement("time");
+        time.textContent = item.at || "";
+        const message = document.createElement("span");
+        message.textContent = item.message || "";
+        li.append(time, message);
+        events.appendChild(li);
+      });
+    }
+  };
+  const refresh = async () => {
+    try {
+      const response = await fetch(endpoint, { headers: { Accept: "application/json" } });
+      if (!response.ok) return;
+      const payload = await response.json();
+      render(payload);
+      const terminal = ["success", "failed", "canceled"].includes(payload.status);
+      if (terminal && ((previousStatus && previousStatus !== payload.status) || (previousStatus === null && reloadOnTerminal))) {
+        window.setTimeout(() => { window.location.href = `${window.location.pathname}#runs`; }, 250);
+        return;
+      }
+      previousStatus = payload.status;
+      if (["queued", "running"].includes(payload.status)) window.setTimeout(refresh, 2000);
+    } catch {
+      window.setTimeout(refresh, 5000);
+    }
+  };
+  refresh();
+  panel.querySelectorAll("[data-run-history-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const runId = button.dataset.runHistoryId;
+      if (runId) window.location.href = `${window.location.pathname}?run_id=${encodeURIComponent(runId)}#runs`;
+    });
+  });
+}
+
+function setupScheduleForm(form) {
+  const runMode = form.querySelector("[name='run_mode']");
+  const scheduleType = form.querySelector("[name='schedule_type']");
+  if (!runMode || !scheduleType) return;
+  const sync = () => {
+    const scheduled = runMode.value === "scheduled";
+    const type = scheduleType.value;
+    form.querySelectorAll("[data-schedule-field]").forEach((field) => {
+      const kind = field.dataset.scheduleField;
+      const visible = scheduled && (
+        kind === "type" || (kind === "time" && type !== "custom") ||
+        (kind === "weekdays" && type === "weekly") || (kind === "custom" && type === "custom")
+      );
+      field.hidden = !visible;
+      field.querySelectorAll("input, select").forEach((input) => { input.disabled = !visible; });
+    });
+  };
+  runMode.addEventListener("change", sync);
+  scheduleType.addEventListener("change", sync);
+  sync();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("[data-wizard]").forEach(setupWizard);
   document.querySelectorAll("[data-rule-editor]").forEach(setupRuleEditor);
+  document.querySelectorAll("[data-run-monitor]").forEach(setupRunMonitor);
+  document.querySelectorAll("[data-schedule-form]").forEach(setupScheduleForm);
 });

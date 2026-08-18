@@ -1,6 +1,15 @@
 {% extends "admin_base.html" %}
 {% block title %}任务监控 - MailPulse{% endblock %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">平台运行状态</p><h1>任务监控</h1><p class="muted">查看同步、归纳和投递任务的执行状态、时间和错误信息。</p></div></div>
-<section class="card"><div class="section-heading"><h2>最近运行记录</h2><span class="muted">最多显示 100 条</span></div>{% if jobs %}<div class="list">{% for job in jobs %}<div class="list-item"><span><strong>{{ job.stage }}</strong><small>{{ job.run_key }} · 开始 {{ job.started_at | fmt_time }}{% if job.finished_at %} · 结束 {{ job.finished_at | fmt_time }}{% endif %}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span><span class="tag {{ job.status }}">{{ job.status }}</span></div>{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</section>
+<div class="page-heading"><div><p class="eyebrow">平台运行状态</p><h1>任务监控</h1><p class="muted">查看所有用户任务的运行摘要；点击记录可展开脱敏阶段日志。</p></div></div>
+<section class="card"><div class="section-heading"><h2>最近运行记录</h2><span class="muted">最多显示 100 条</span></div>
+{% if jobs %}<div class="list admin-job-list">
+{% for job in jobs %}
+<details class="run-log-panel" data-run-monitor data-endpoint="/admin/jobs/{{ job.id }}">
+  <summary><span><strong>任务 {{ job.task_id or '—' }} · {{ '同步' if job.run_kind == 'sync' else '归纳任务' }}</strong><small>用户 {{ job.user_id or '—' }} · 阶段 {{ {'sync': '同步邮件', 'attachments': '附件处理', 'summarize': 'AI 归纳', 'delivery': '投递报告', 'complete': '完成'}.get(job.stage, job.stage) }} · {{ job.started_at | fmt_time }}{% if job.finished_at %} 至 {{ job.finished_at | fmt_time }}{% endif %}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span><span class="tag {{ 'success' if job.status == 'success' else ('failed' if job.status in ['failed', 'canceled'] else ('running' if job.status == 'running' else 'pending')) }}" data-run-status>{{ {'queued': '等待中', 'running': '运行中', 'success': '成功', 'failed': '失败', 'canceled': '已取消'}.get(job.status, job.status) }}</span></summary>
+  <div class="run-log-body"><div class="run-log-actions">
+    {% if job.status in ['queued', 'running'] %}<form method="post" action="/admin/jobs/{{ job.id }}/cancel" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary" type="submit" data-processing-label="取消中…">取消运行</button></form>{% endif %}
+  </div><ol class="run-log-events" data-run-events>{% for event in (job.details.get('events', []) if job.details else []) %}<li class="run-log-event {{ event.level or 'info' }}"><time>{{ event.at | fmt_time }}</time><span>{{ event.message }}</span></li>{% endfor %}</ol><p class="muted compact" data-run-error>{{ job.error_message or '' }}</p></div>
+</details>
+{% endfor %}</div>{% else %}<p class="empty">暂无任务记录。</p>{% endif %}</section>
 {% endblock %}

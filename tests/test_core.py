@@ -44,6 +44,7 @@ from mailpulse.models import (
     AuditLog,
     CanonicalMessage,
     Delivery,
+    JobRun,
     Mailbox,
     MessageOccurrence,
     ModelBinding,
@@ -59,7 +60,13 @@ from mailpulse.rules import RuleService
 from mailpulse.search import SearchService
 from mailpulse.security import decrypt_secret, encrypt_secret, verify_password
 from mailpulse.web.rate_limit import LoginRateLimiter
-from mailpulse.worker import _due_fire_time, build_cron_expression, run_task_now
+from mailpulse.worker import (
+    _due_fire_time,
+    build_cron_expression,
+    enqueue_job_run,
+    run_due_tasks,
+    run_task_now,
+)
 
 
 def make_settings(tmp_path) -> Settings:
@@ -1370,7 +1377,7 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     assert "项目周会与本周行动项" in filtered.text
     assert user_client.get("/messages?mailbox_id=999999").status_code == 200
 
-    # 手动运行任务：同步（空）→ 生成报告（桩）→ 跳转报告详情
+    # 手动运行任务：提交后台 JobRun；worker 再执行同步（空）→ 生成报告（桩）
     class StubReportService:
         def __init__(self, session, settings=None):
             self.session = session
@@ -1406,8 +1413,23 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         follow_redirects=False,
     )
     assert run_response.status_code == 303
-    assert run_response.headers["location"].startswith("/reports/")
-    report_id = int(run_response.headers["location"].split("/")[2])
+    assert run_response.headers["location"] == f"/tasks/{task_id}?run=queued"
+    queued_db = build_session_factory(settings)()
+    try:
+        queued_job = queued_db.query(JobRun).filter(JobRun.task_id == task_id).one()
+        assert queued_job.status == "queued"
+        worker_module.run_task_now(
+            queued_db,
+            queued_db.get(Task, task_id),
+            settings,
+            queued_job.run_key,
+            datetime.now(UTC),
+            job=queued_job,
+            run_kind=queued_job.run_kind,
+        )
+        report_id = queued_db.query(Report).filter(Report.task_id == task_id).one().id
+    finally:
+        queued_db.close()
     reports_page_text = user_client.get("/reports").text
     assert "演示报告" in reports_page_text
     report_detail_page = user_client.get(f"/reports/{report_id}")
@@ -2540,3 +2562,376 @@ def test_delivery_target_edit_and_test_email(tmp_path, monkeypatch):
     assert RecordingSMTPProvider.last[0] == "inbox@example.com"
     assert RecordingSMTPProvider.last[1] == "newboss@example.com"
     assert "MailPulse 投递渠道测试" in RecordingSMTPProvider.last[2]
+
+
+def test_report_scope_filters_before_limit_and_uses_occurrence_time(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        secret_key="report-scope-secret",
+        credential_key="report-scope-credential",
+        max_messages_per_report=1,
+    )
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "scope", "password-123")
+        mailbox_a = Mailbox(
+            user_id=user.id,
+            email_address="a@example.com",
+            imap_host="fake-a",
+            username="a@example.com",
+            credential_encrypted=encrypt_secret("a-secret", settings),
+        )
+        mailbox_b = Mailbox(
+            user_id=user.id,
+            email_address="b@example.com",
+            imap_host="fake-b",
+            username="b@example.com",
+            credential_encrypted=encrypt_secret("b-secret", settings),
+        )
+        db.add_all([mailbox_a, mailbox_b])
+        db.flush()
+        task = Task(user_id=user.id, mailbox_id=mailbox_a.id, name="A 邮箱任务")
+        db.add(task)
+        db.flush()
+        old_time = datetime(2026, 8, 18, 1, 0, tzinfo=UTC)
+        new_time = datetime(2026, 8, 18, 2, 0, tzinfo=UTC)
+        messages = [
+            CanonicalMessage(
+                owner_user_id=user.id,
+                content_hash="scope-old",
+                subject="命中旧邮件",
+                sender="sender@example.com",
+                recipients=["a@example.com"],
+                body_text="正文",
+                received_at=None,
+            ),
+            CanonicalMessage(
+                owner_user_id=user.id,
+                content_hash="scope-new",
+                subject="其他新邮件",
+                sender="sender@example.com",
+                recipients=["a@example.com"],
+                body_text="正文",
+                received_at=new_time,
+            ),
+            CanonicalMessage(
+                owner_user_id=user.id,
+                content_hash="scope-other-mailbox",
+                subject="命中其他邮箱",
+                sender="sender@example.com",
+                recipients=["b@example.com"],
+                body_text="正文",
+                received_at=new_time,
+            ),
+        ]
+        db.add_all(messages)
+        db.flush()
+        db.add_all(
+            [
+                MessageOccurrence(
+                    message_id=messages[0].id,
+                    mailbox_id=mailbox_a.id,
+                    folder="INBOX",
+                    uid_validity="a",
+                    uid=1,
+                    source_id=mailbox_a.sync_source_id,
+                    internal_date=old_time,
+                ),
+                MessageOccurrence(
+                    message_id=messages[1].id,
+                    mailbox_id=mailbox_a.id,
+                    folder="INBOX",
+                    uid_validity="a",
+                    uid=2,
+                    source_id=mailbox_a.sync_source_id,
+                    internal_date=new_time,
+                ),
+                MessageOccurrence(
+                    message_id=messages[2].id,
+                    mailbox_id=mailbox_b.id,
+                    folder="INBOX",
+                    uid_validity="b",
+                    uid=1,
+                    source_id=mailbox_b.sync_source_id,
+                    internal_date=new_time,
+                ),
+            ]
+        )
+        db.add(
+            RuleSet(
+                task_id=task.id,
+                name="只看命中",
+                definition={
+                    "kind": "condition",
+                    "field": "subject",
+                    "operator": "contains",
+                    "value": "命中",
+                },
+            )
+        )
+        db.commit()
+        report = ReportService(db, settings).generate_for_user(
+            user,
+            task,
+            use_demo_provider=True,
+            period_start=old_time - timedelta(minutes=1),
+            period_end=new_time + timedelta(minutes=1),
+        )
+        assert report.summary["matched_message_count"] == 1
+        assert report.summary["message_count"] == 1
+        assert report.summary["truncated"] is False
+        assert "命中旧邮件" in report.rendered_markdown or report.summary["message_count"] == 1
+    finally:
+        db.close()
+
+
+def test_imap_fetch_failure_does_not_advance_cursor(monkeypatch):
+    raw = (
+        b"From: sender@example.com\n"
+        b"To: user@example.com\n"
+        b"Subject: Chunk\n"
+        b"Message-ID: <chunk@example.com>\n\nBody"
+    )
+
+    class FailingChunkClient:
+        def response(self, key):
+            assert key == "UIDVALIDITY"
+            return "OK", [b"7"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                return "OK", [b" ".join(str(uid).encode() for uid in range(1, 202))]
+            chunk = [int(value) for value in args[0].split(",")]
+            if chunk[0] == 201:
+                return "NO", []
+            return "OK", [
+                *((f"UID {uid}".encode(), raw) for uid in chunk),
+                b")",
+            ]
+
+        def logout(self):
+            return "BYE", []
+
+    connector = IMAPConnector(
+        MailboxConnection(
+            host="fake",
+            port=993,
+            username="user@example.com",
+            password="secret",
+        )
+    )
+    monkeypatch.setattr(connector, "_open", lambda: FailingChunkClient())
+    with pytest.raises(ConnectionError, match="UID 201-201"):
+        connector.sync_messages()
+
+
+def test_failed_schedule_slot_is_not_retried_on_next_worker_poll(tmp_path, monkeypatch):
+    import mailpulse.worker as worker_module
+
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    now_anchor = datetime.now(UTC).replace(second=30, microsecond=0)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "schedule-once", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="schedule@example.com",
+            imap_host="fake",
+            username="schedule@example.com",
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        task = Task(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            run_mode="scheduled",
+            cron_expression="* * * * *",
+            timezone="UTC",
+            last_run_at=now_anchor - timedelta(minutes=1),
+        )
+        db.add(task)
+        db.commit()
+    finally:
+        db.close()
+
+    calls = []
+
+    def fake_run(session, task, settings, run_key, now, *, job=None, run_kind="task"):
+        calls.append(run_key)
+        job.status = "failed"
+        job.stage = "sync"
+        job.finished_at = now
+        session.get(Task, task.id).active_run_key = None
+        session.get(Mailbox, task.mailbox_id).active_run_key = None
+        session.commit()
+        return job
+
+    frozen_now = now_anchor
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_now if tz is not None else frozen_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(worker_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(worker_module, "run_task_now", fake_run)
+    assert run_due_tasks(settings) == 0
+    assert run_due_tasks(settings) == 0
+    assert len(calls) == 1
+
+
+def test_enqueue_rejects_same_task_and_mailbox_concurrency(tmp_path):
+    settings = make_settings(tmp_path)
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "lock", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="lock@example.com",
+            imap_host="fake",
+            username="lock@example.com",
+            credential_encrypted=encrypt_secret("secret", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        task = Task(user_id=user.id, mailbox_id=mailbox.id, name="锁任务")
+        db.add(task)
+        db.flush()
+        first = enqueue_job_run(db, task, user)
+        db.commit()
+        assert first.status == "queued"
+        with pytest.raises(ValueError, match="运行中的"):
+            enqueue_job_run(db, task, user)
+        db.rollback()
+        assert db.get(Task, task.id).active_run_key == first.run_key
+    finally:
+        db.close()
+
+
+def test_web_requires_current_password_and_unchecked_task_is_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "account-checkbox-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    user = create_user(db, "account-check", "password-123")
+    mailbox = Mailbox(
+        user_id=user.id,
+        email_address="account@example.com",
+        imap_host="fake",
+        username="account@example.com",
+        credential_encrypted=encrypt_secret("secret", settings),
+    )
+    db.add(mailbox)
+    db.flush()
+    task = Task(user_id=user.id, mailbox_id=mailbox.id, name="启用任务", is_enabled=True)
+    db.add(task)
+    db.commit()
+    task_id = task.id
+    db.close()
+
+    client = TestClient(app)
+    login = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "account-check", "password": "password-123", "csrf_token": token},
+    )
+    account = client.get("/account")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+    missing_current = client.post(
+        "/account",
+        data={
+            "display_name": "新名称",
+            "new_password": "new-password-456",
+            "confirm_password": "new-password-456",
+            "csrf_token": token,
+        },
+    )
+    assert "当前密码不正确" in missing_current.text
+
+    detail = client.get(f"/tasks/{task_id}")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', detail.text).group(1)
+    updated = client.post(
+        f"/tasks/{task_id}/basic",
+        data={
+            "name": "停用任务",
+            "run_mode": "manual",
+            "timezone": "Asia/Shanghai",
+            "lookback_hours": "24",
+            "csrf_token": token,
+        },
+        follow_redirects=False,
+    )
+    assert updated.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        assert db.get(Task, task_id).is_enabled is False
+        assert authenticate(db, "account-check", "password-123") is not None
+        assert authenticate(db, "account-check", "new-password-456") is None
+    finally:
+        db.close()
+
+
+def test_copy_mailbox_preserves_tls_and_creates_independent_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "copy-mailbox-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    user = create_user(db, "copy-mailbox", "password-123")
+    source = Mailbox(
+        user_id=user.id,
+        email_address="source@example.com",
+        imap_host="imap.example.com",
+        imap_port=143,
+        imap_tls=False,
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        smtp_tls=False,
+        username="source-login",
+        credential_encrypted=encrypt_secret("source-secret", settings),
+        folder="Archive",
+    )
+    db.add(source)
+    db.commit()
+    source_id = source.id
+    db.close()
+
+    client = TestClient(app)
+    login = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+    client.post(
+        "/login",
+        data={"username": "copy-mailbox", "password": "password-123", "csrf_token": token},
+    )
+    page = client.get("/tasks/new")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)
+    created = client.post(
+        "/tasks",
+        data={"name": "复制任务", "copy_from": str(source_id), "csrf_token": token},
+        follow_redirects=False,
+    )
+    assert created.status_code == 303
+    db = build_session_factory(settings)()
+    try:
+        copied = db.query(Mailbox).filter(Mailbox.id != source_id).one()
+        assert copied.imap_port == 143 and copied.imap_tls is False
+        assert copied.smtp_port == 587 and copied.smtp_tls is False
+        assert copied.folder == "Archive"
+        assert decrypt_secret(copied.credential_encrypted, settings) == "source-secret"
+        copied.email_address = "copy@example.com"
+        db.commit()
+        assert db.get(Mailbox, source_id).email_address == "source@example.com"
+    finally:
+        db.close()

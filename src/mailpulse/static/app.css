@@ -626,6 +626,22 @@ a.task-card:hover {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
+.run-log-panel,
+.run-history { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.run-log-panel > summary,
+.run-history > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; cursor: pointer; list-style-position: inside; }
+.run-log-panel > summary small { display: block; margin-top: 4px; color: var(--muted); }
+.run-log-body { padding: 0 16px 16px; }
+.run-log-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.run-log-events { display: grid; gap: 8px; margin: 0; padding: 0 0 0 22px; }
+.run-log-event { padding-left: 4px; line-height: 1.5; }
+.run-log-event time { display: inline-block; min-width: 145px; margin-right: 8px; color: var(--muted); font-size: 12px; }
+.run-log-event.warning { color: var(--warning); }
+.run-log-event.error { color: var(--danger); }
+.run-history { padding: 0 16px 10px; }
+.run-history > summary { margin: 0 -16px; }
+.run-history-item { width: 100%; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.run-history-item:hover { background: var(--accent-soft); }
 .message-item strong { overflow-wrap: anywhere; }
 .message-item .muted { margin-bottom: 2px; }
 .message-item > .actions { flex: 0 1 auto; justify-content: flex-end; }
@@ -989,6 +1005,8 @@ pre { margin: 0; }
   .report-card { padding: 20px; }
   .message-item { flex-direction: column; }
   .message-item > .actions { width: 100%; justify-content: flex-start; }
+  .list-item > .actions { width: 100%; justify-content: flex-start; }
+  .target-edit-form { position: static; width: 100%; max-width: none; margin-top: 8px; }
   .label-form { flex: 1 1 230px; }
   .label-form input { flex: 1 1 auto; width: auto; }
 }

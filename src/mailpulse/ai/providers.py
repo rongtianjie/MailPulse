@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Protocol
 
 import httpx
@@ -101,14 +102,26 @@ class OpenAICompatibleProvider:
                 last_error = exc
                 if attempt >= request.retries:
                     raise
+                time.sleep(self._retry_delay(attempt, None))
                 continue
             if response.status_code not in retryable_statuses and response.status_code < 500:
                 return response
             if attempt >= request.retries:
                 return response
+            time.sleep(self._retry_delay(attempt, response))
         if last_error is not None:
             raise last_error
         raise RuntimeError("AI 请求未返回响应")
+
+    @staticmethod
+    def _retry_delay(attempt: int, response: httpx.Response | None) -> float:
+        retry_after = response.headers.get("Retry-After") if response is not None else None
+        try:
+            if retry_after is not None:
+                return min(max(float(retry_after), 0.0), 30.0)
+        except ValueError:
+            pass
+        return min(0.25 * (2**attempt), 4.0)
 
     @staticmethod
     def _content(parts: list[ContentPart]) -> list[dict[str, object]]:

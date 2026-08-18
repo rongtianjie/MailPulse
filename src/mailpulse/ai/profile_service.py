@@ -88,6 +88,10 @@ class AIProfileService:
             )
         )
 
+    def provider_for_profile(self, profile: AIProviderProfile) -> OpenAICompatibleProvider:
+        """Build a configured provider for an administrator connection test."""
+        return self._provider(profile)
+
 
 def _is_local_url(value: str) -> bool:
     parsed = urlparse(value)

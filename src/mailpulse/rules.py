@@ -12,10 +12,15 @@ from .models import Attachment, CanonicalMessage, RuleSet
 MATCH_ALL = {"kind": "match_all"}
 
 
-def message_rule_data(session: Session, message: CanonicalMessage) -> dict[str, Any]:
-    attachments = list(
-        session.scalars(select(Attachment).where(Attachment.message_id == message.id))
-    )
+def message_rule_data(
+    session: Session,
+    message: CanonicalMessage,
+    attachments: list[Attachment] | None = None,
+) -> dict[str, Any]:
+    if attachments is None:
+        attachments = list(
+            session.scalars(select(Attachment).where(Attachment.message_id == message.id))
+        )
     return {
         "subject": message.subject,
         "sender": message.sender,
@@ -48,10 +53,12 @@ class RuleService:
             return list(messages)
         definition = rule_set.definition or MATCH_ALL
         self.validate(definition)
+        messages = list(messages)
+        data = self._prefetch_rule_data(messages)
         return [
             message
             for message in messages
-            if self.evaluator.evaluate(definition, message_rule_data(self.session, message))
+            if self.evaluator.evaluate(definition, data[message.id])
         ]
 
     def filter_messages_any(
@@ -65,14 +72,38 @@ class RuleService:
         duplicates are removed while preserving the input order. With no
         enabled rule sets every message is kept.
         """
+        messages = list(messages)
         enabled = [item for item in rule_sets if item is not None and item.is_enabled]
         if not enabled:
-            return list(messages)
+            return messages
+        data = self._prefetch_rule_data(messages)
         result: list[CanonicalMessage] = []
         seen: set[int] = set()
         for rule_set in enabled:
-            for message in self.filter_messages(messages, rule_set):
+            definition = rule_set.definition or MATCH_ALL
+            self.validate(definition)
+            for message in messages:
+                if not self.evaluator.evaluate(definition, data[message.id]):
+                    continue
                 if message.id not in seen:
                     seen.add(message.id)
                     result.append(message)
         return result
+
+    def _prefetch_rule_data(self, messages: list[CanonicalMessage]) -> dict[int, dict[str, Any]]:
+        attachments_by_message: dict[int, list[Attachment]] = {
+            message.id: [] for message in messages
+        }
+        if messages:
+            for attachment in self.session.scalars(
+                select(Attachment).where(
+                    Attachment.message_id.in_([message.id for message in messages])
+                )
+            ):
+                attachments_by_message.setdefault(attachment.message_id, []).append(attachment)
+        return {
+            message.id: message_rule_data(
+                self.session, message, attachments_by_message.get(message.id, [])
+            )
+            for message in messages
+        }

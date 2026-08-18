@@ -4,23 +4,23 @@ import json
 from datetime import UTC, datetime
 from math import ceil
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..ai.profile_service import AIProfileService
 from ..auth import authenticate, create_user, set_password
 from ..config import get_settings
-from ..delivery import ReportDeliveryService, SMTPConfig, SMTPDeliveryProvider
+from ..delivery import ReportDeliveryService, SMTPConfig, SMTPDeliveryProvider, normalize_recipient
 from ..demo import seed_demo
 from ..errors import error_message
 from ..mail.connectors import IMAPConnector
-from ..mail.sync import MailSyncService
 from ..mail.types import MailboxConnection
 from ..models import (
     AIProviderProfile,
@@ -39,7 +39,13 @@ from ..models import (
 from ..rules import MATCH_ALL, RuleService
 from ..search import SearchService
 from ..security import decrypt_secret, encrypt_secret
-from ..worker import build_cron_expression, next_fire_time, run_task_now, validate_schedule
+from ..worker import (
+    append_job_log,
+    build_cron_expression,
+    enqueue_job_run,
+    next_fire_time,
+    validate_schedule,
+)
 from .csrf import get_csrf_token, validate_csrf
 from .deps import admin_user, authenticated_user, current_user, get_db
 from .rate_limit import get_login_rate_limiter, get_register_rate_limiter
@@ -50,7 +56,8 @@ router = APIRouter()
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 MESSAGES_PAGE_SIZE = 50
 REMEMBER_PASSWORD_COOKIE = "mailpulse_remember_credentials"
-TASK_RUN_STAGES = {"sync", "summarize", "delivery", "complete"}
+TASK_RUN_STAGES = {"sync", "attachments", "summarize", "delivery", "complete"}
+ACTIVE_JOB_STATUSES = {"queued", "running"}
 
 
 def _remember_password_saved(request: Request, settings) -> tuple[str, str] | None:
@@ -370,7 +377,7 @@ def update_account(
     validate_csrf(request, csrf_token)
     password_error = None
     if new_password:
-        if current_password and authenticate(db, user.username, current_password) is None:
+        if not current_password or authenticate(db, user.username, current_password) is None:
             password_error = "当前密码不正确"
         elif new_password != confirm_password:
             password_error = "两次输入的新密码不一致"
@@ -657,11 +664,13 @@ def _parse_targets_json(value: str) -> list[str]:
         raise ValueError("投递渠道数据格式无效")
     targets = []
     for item in parsed:
-        destination = str(item or "").strip().lower()
+        destination = str(item or "").strip()
         if not destination:
             continue
-        if "@" not in destination:
-            raise ValueError(f"投递邮箱「{destination}」格式无效")
+        try:
+            destination = normalize_recipient(destination)
+        except ValueError as exc:
+            raise ValueError(f"投递邮箱「{destination}」格式无效：{exc}") from exc
         if destination in targets:
             raise ValueError(f"投递邮箱「{destination}」已重复")
         targets.append(destination)
@@ -708,12 +717,50 @@ def _mailbox_form_values(mailbox: Mailbox | None) -> dict:
         "email_address": mailbox.email_address if mailbox else "",
         "imap_host": mailbox.imap_host if mailbox else "",
         "imap_port": mailbox.imap_port if mailbox else 993,
+        "imap_tls": mailbox.imap_tls if mailbox else True,
         "username": mailbox.username if mailbox else "",
         "password": "",
         "smtp_host": mailbox.smtp_host if mailbox else "",
         "smtp_port": mailbox.smtp_port if mailbox else 465,
+        "smtp_tls": mailbox.smtp_tls if mailbox else True,
         "folder": mailbox.folder if mailbox else "INBOX",
     }
+
+
+def _validate_mailbox_form(
+    email_address: str,
+    imap_host: str,
+    imap_port: int | None,
+    username: str,
+    folder: str,
+    smtp_host: str = "",
+    smtp_port: int = 465,
+) -> tuple[str, str] | None:
+    try:
+        normalized_email = normalize_recipient(email_address)
+    except ValueError as exc:
+        raise ValueError(f"邮箱地址无效：{exc}") from exc
+    if not imap_host.strip() or len(imap_host.strip()) > 255:
+        raise ValueError("IMAP 主机不能为空且不能超过 255 个字符")
+    if not 1 <= imap_port <= 65535:
+        raise ValueError("IMAP 端口必须在 1 到 65535 之间")
+    if not username.strip() or len(username.strip()) > 320:
+        raise ValueError("登录用户名不能为空且不能超过 320 个字符")
+    if not folder.strip() or len(folder.strip()) > 255:
+        raise ValueError("同步文件夹不能为空且不能超过 255 个字符")
+    if len(smtp_host.strip()) > 255:
+        raise ValueError("SMTP 主机不能超过 255 个字符")
+    if smtp_host.strip() and not 1 <= smtp_port <= 65535:
+        raise ValueError("SMTP 端口必须在 1 到 65535 之间")
+    return normalized_email, folder.strip()
+
+
+def _reset_mailbox_sync_source(mailbox: Mailbox) -> None:
+    mailbox.sync_source_id = uuid4().hex
+    mailbox.sync_uid_validity = None
+    mailbox.sync_last_uid = 0
+    mailbox.last_synced_at = None
+    mailbox.sync_error = None
 
 
 def _render_task_page(
@@ -731,6 +778,7 @@ def _render_task_page(
     tested: bool = False,
     tested_smtp: bool = False,
     sync_failed: bool = False,
+    selected_job_id: int | None = None,
 ):
     mailbox = db.get(Mailbox, task.mailbox_id)
     rules = list(
@@ -759,6 +807,12 @@ def _render_task_page(
             .limit(10)
         )
     )
+    selected_job = next((item for item in jobs if item.id == selected_job_id), None)
+    active_job = next((item for item in jobs if item.status in ACTIVE_JOB_STATUSES), None)
+    latest_job = jobs[0] if jobs else None
+    if selected_job is not None:
+        active_job = selected_job
+        latest_job = selected_job
     reports = list(
         db.scalars(
             select(Report)
@@ -800,6 +854,8 @@ def _render_task_page(
         rule_views=rule_views,
         targets=targets,
         jobs=jobs,
+        active_job=active_job,
+        latest_job=latest_job,
         reports=reports,
         other_mailboxes=other_mailboxes,
         form=form if form is not None else _task_to_form(task),
@@ -880,6 +936,7 @@ def _render_task_new_page(
     targets_form: list[str],
     error: str | None,
     notice: str | None = None,
+    active_step: int = 1,
 ):
     mailboxes = list(
         db.scalars(
@@ -897,6 +954,7 @@ def _render_task_new_page(
         rules_form=rules_form,
         targets_form=targets_form,
         mailboxes=mailboxes,
+        active_step=active_step,
         rule_fields=RULE_FORM_FIELDS,
         rule_operators=RULE_FORM_OPERATORS,
         rule_field_labels=RULE_FIELD_LABELS,
@@ -910,22 +968,26 @@ def _wizard_mailbox_values(
     mailbox_name: str,
     email_address: str,
     imap_host: str,
-    imap_port: int,
+    imap_port: int | None,
     username: str,
     password: str,
     smtp_host: str,
-    smtp_port: int,
+    smtp_port: int | None,
     folder: str,
+    imap_tls: bool | None = True,
+    smtp_tls: bool | None = True,
 ) -> dict:
     return {
         "name": mailbox_name,
         "email_address": email_address,
         "imap_host": imap_host,
-        "imap_port": imap_port,
+        "imap_port": imap_port or 993,
         "username": username,
-        "password": password,
+        "password": "",
         "smtp_host": smtp_host,
-        "smtp_port": smtp_port,
+        "smtp_port": smtp_port or 465,
+        "imap_tls": True if imap_tls is None else imap_tls,
+        "smtp_tls": True if smtp_tls is None else smtp_tls,
         "folder": folder,
     }
 
@@ -965,17 +1027,19 @@ def test_new_task_imap(
     custom_cron: str = Form(""),
     timezone: str = Form(DEFAULT_TIMEZONE),
     lookback_hours: int = Form(24),
-    is_enabled: bool = Form(True),
+    is_enabled: bool = Form(False),
     copy_from: int | None = Form(None),
     mailbox_name: str = Form("收件邮箱"),
     email_address: str = Form(""),
     imap_host: str = Form(""),
-    imap_port: int = Form(993),
+    imap_port: int | None = Form(None),
+    imap_tls: bool | None = Form(None),
     username: str = Form(""),
     password: str = Form(""),
     smtp_host: str = Form(""),
-    smtp_port: int = Form(465),
-    folder: str = Form("INBOX"),
+    smtp_port: int | None = Form(None),
+    smtp_tls: bool | None = Form(None),
+    folder: str = Form(""),
     rules_json: str = Form("[]"),
     targets_json: str = Form("[]"),
     csrf_token: str | None = Form(None),
@@ -989,7 +1053,7 @@ def test_new_task_imap(
     )
     mailbox_form = _wizard_mailbox_values(
         mailbox_name, email_address, imap_host, imap_port, username,
-        password, smtp_host, smtp_port, folder,
+        password, smtp_host, smtp_port, folder, imap_tls, smtp_tls,
     )
     try:
         rules_form = _parse_rules_json(rules_json)
@@ -1000,10 +1064,11 @@ def test_new_task_imap(
             rules_form=_rules_json_to_drafts(rules_json),
             targets_form=_targets_json_to_list(targets_json),
             error=str(exc),
+            active_step=2,
         )
     connection = _draft_mailbox_connection(
         db, user, copy_from, email_address, imap_host, imap_port, username,
-        password, folder, smtp_host, smtp_port,
+        password, folder, smtp_host, smtp_port, imap_tls,
     )
     try:
         IMAPConnector(connection).test_connection()
@@ -1014,11 +1079,13 @@ def test_new_task_imap(
             request, user, db, form=form, mailbox_form=mailbox_form,
             rules_form=rules_form, targets_form=targets_form,
             error=f"连接测试失败：{error_message(exc)}",
+            active_step=2,
         )
     return _render_task_new_page(
         request, user, db, form=form, mailbox_form=mailbox_form,
         rules_form=rules_form, targets_form=targets_form,
         error=None, notice=notice,
+        active_step=2,
     )
 
 
@@ -1033,17 +1100,19 @@ def test_new_task_smtp(
     custom_cron: str = Form(""),
     timezone: str = Form(DEFAULT_TIMEZONE),
     lookback_hours: int = Form(24),
-    is_enabled: bool = Form(True),
+    is_enabled: bool = Form(False),
     copy_from: int | None = Form(None),
     mailbox_name: str = Form("收件邮箱"),
     email_address: str = Form(""),
     imap_host: str = Form(""),
-    imap_port: int = Form(993),
+    imap_port: int | None = Form(None),
+    imap_tls: bool | None = Form(None),
     username: str = Form(""),
     password: str = Form(""),
     smtp_host: str = Form(""),
-    smtp_port: int = Form(465),
-    folder: str = Form("INBOX"),
+    smtp_port: int | None = Form(None),
+    smtp_tls: bool | None = Form(None),
+    folder: str = Form(""),
     rules_json: str = Form("[]"),
     targets_json: str = Form("[]"),
     csrf_token: str | None = Form(None),
@@ -1057,7 +1126,7 @@ def test_new_task_smtp(
     )
     mailbox_form = _wizard_mailbox_values(
         mailbox_name, email_address, imap_host, imap_port, username,
-        password, smtp_host, smtp_port, folder,
+        password, smtp_host, smtp_port, folder, imap_tls, smtp_tls,
     )
     try:
         rules_form = _parse_rules_json(rules_json)
@@ -1068,8 +1137,12 @@ def test_new_task_smtp(
             rules_form=_rules_json_to_drafts(rules_json),
             targets_form=_targets_json_to_list(targets_json),
             error=str(exc),
+            active_step=2,
         )
-    effective_smtp_host = smtp_host
+    effective_smtp_host = smtp_host.strip()
+    effective_smtp_port = smtp_port or 465
+    effective_username = username.strip()
+    effective_tls = True if smtp_tls is None else smtp_tls
     if copy_from is not None:
         source = db.scalar(
             select(Mailbox).where(Mailbox.id == copy_from, Mailbox.user_id == user.id)
@@ -1079,29 +1152,34 @@ def test_new_task_smtp(
                 request, user, db, form=form, mailbox_form=mailbox_form,
                 rules_form=rules_form, targets_form=targets_form,
                 error="复制的邮箱不存在或不属于当前用户",
+                active_step=2,
             )
-        if not effective_smtp_host:
-            effective_smtp_host = source.smtp_host
-            mailbox_form = {
-                **mailbox_form,
-                "smtp_host": source.smtp_host,
-                "smtp_port": source.smtp_port,
-            }
+        effective_smtp_host = effective_smtp_host or source.smtp_host
+        effective_smtp_port = smtp_port or source.smtp_port
+        effective_username = effective_username or source.username
+        effective_tls = source.smtp_tls if smtp_tls is None else smtp_tls
+        mailbox_form = {
+            **mailbox_form,
+            "smtp_host": effective_smtp_host,
+            "smtp_port": effective_smtp_port,
+            "smtp_tls": effective_tls,
+        }
     if not effective_smtp_host:
         return _render_task_new_page(
             request, user, db, form=form, mailbox_form=mailbox_form,
             rules_form=rules_form, targets_form=targets_form,
             error="SMTP 主机未配置，无法验证连接",
+            active_step=2,
         )
     effective_password = password or _draft_mailbox_password(db, user, copy_from)
     try:
         SMTPDeliveryProvider(
             SMTPConfig(
                 host=effective_smtp_host,
-                port=smtp_port,
-                username=username,
+                port=effective_smtp_port,
+                username=effective_username,
                 password=effective_password,
-                use_tls=True,
+                use_tls=effective_tls,
             )
         ).test_connection()
         notice = "SMTP 连接验证成功。"
@@ -1111,11 +1189,13 @@ def test_new_task_smtp(
             request, user, db, form=form, mailbox_form=mailbox_form,
             rules_form=rules_form, targets_form=targets_form,
             error=f"SMTP 连接测试失败：{error_message(exc)}",
+            active_step=2,
         )
     return _render_task_new_page(
         request, user, db, form=form, mailbox_form=mailbox_form,
         rules_form=rules_form, targets_form=targets_form,
         error=None, notice=notice,
+        active_step=2,
     )
 
 
@@ -1155,7 +1235,8 @@ def _draft_mailbox_connection(
     password: str,
     folder: str,
     smtp_host: str,
-    smtp_port: int,
+    smtp_port: int | None,
+    imap_tls: bool = True,
 ) -> MailboxConnection:
     if copy_from is not None:
         source = db.scalar(
@@ -1163,19 +1244,19 @@ def _draft_mailbox_connection(
         )
         if source is not None:
             return MailboxConnection(
-                host=source.imap_host,
-                port=source.imap_port,
-                username=source.username,
-                password=decrypt_secret(source.credential_encrypted, get_settings()),
-                tls=source.imap_tls,
-                folder=source.folder,
+                host=imap_host.strip() or source.imap_host,
+                port=imap_port or source.imap_port,
+                username=username.strip() or source.username,
+                password=password or decrypt_secret(source.credential_encrypted, get_settings()),
+                tls=imap_tls if imap_tls is not None else source.imap_tls,
+                folder=folder.strip() or source.folder,
             )
     return MailboxConnection(
         host=imap_host.strip(),
-        port=imap_port,
+        port=imap_port or 993,
         username=username.strip(),
         password=password,
-        tls=True,
+        tls=True if imap_tls is None else imap_tls,
         folder=folder.strip() or "INBOX",
     )
 
@@ -1191,17 +1272,19 @@ def create_task(
     custom_cron: str = Form(""),
     timezone: str = Form(DEFAULT_TIMEZONE),
     lookback_hours: int = Form(24),
-    is_enabled: bool = Form(True),
+    is_enabled: bool = Form(False),
     copy_from: int | None = Form(None),
     mailbox_name: str = Form("收件邮箱"),
     email_address: str = Form(""),
     imap_host: str = Form(""),
-    imap_port: int = Form(993),
+    imap_port: int | None = Form(None),
+    imap_tls: bool | None = Form(None),
     username: str = Form(""),
     password: str = Form(""),
     smtp_host: str = Form(""),
-    smtp_port: int = Form(465),
-    folder: str = Form("INBOX"),
+    smtp_port: int | None = Form(None),
+    smtp_tls: bool | None = Form(None),
+    folder: str = Form(""),
     rules_json: str = Form("[]"),
     targets_json: str = Form("[]"),
     csrf_token: str | None = Form(None),
@@ -1215,7 +1298,7 @@ def create_task(
     )
     submitted_mailbox = _wizard_mailbox_values(
         mailbox_name, email_address, imap_host, imap_port, username,
-        password, smtp_host, smtp_port, folder,
+        password, smtp_host, smtp_port, folder, imap_tls, smtp_tls,
     )
     try:
         rules_json_parsed = _parse_rules_json(rules_json)
@@ -1230,32 +1313,61 @@ def create_task(
             )
             if source is None:
                 raise ValueError("复制的邮箱不存在或不属于当前用户")
+            effective_password = password or decrypt_secret(
+                source.credential_encrypted, get_settings()
+            )
+            effective_email = email_address.strip() or source.email_address
+            effective_imap_host = imap_host.strip() or source.imap_host
+            effective_username = username.strip() or source.username
+            effective_folder = folder.strip() or source.folder
+            effective_smtp_host = smtp_host.strip() or source.smtp_host
+            effective_imap_port = imap_port or source.imap_port
+            effective_smtp_port = smtp_port or source.smtp_port
+            effective_imap_tls = source.imap_tls if imap_tls is None else imap_tls
+            effective_smtp_tls = source.smtp_tls if smtp_tls is None else smtp_tls
+            normalized_email, normalized_folder = _validate_mailbox_form(
+                effective_email, effective_imap_host, effective_imap_port,
+                effective_username, effective_folder, effective_smtp_host, effective_smtp_port
+            )
             mailbox = Mailbox(
                 user_id=user.id,
-                name=source.name,
-                email_address=source.email_address,
-                imap_host=source.imap_host,
-                imap_port=source.imap_port,
-                smtp_host=source.smtp_host,
-                smtp_port=source.smtp_port,
-                username=source.username,
-                credential_encrypted=source.credential_encrypted,
-                folder=source.folder,
+                name=mailbox_name.strip() or source.name,
+                email_address=normalized_email,
+                imap_host=effective_imap_host,
+                imap_port=effective_imap_port,
+                imap_tls=effective_imap_tls,
+                smtp_host=effective_smtp_host,
+                smtp_port=effective_smtp_port,
+                smtp_tls=effective_smtp_tls,
+                username=effective_username,
+                credential_encrypted=encrypt_secret(effective_password),
+                folder=normalized_folder,
             )
         else:
             if not password:
                 raise ValueError("首次配置邮箱必须填写邮箱密码")
+            normalized_email, normalized_folder = _validate_mailbox_form(
+                email_address,
+                imap_host,
+                imap_port or 993,
+                username,
+                folder.strip() or "INBOX",
+                smtp_host,
+                smtp_port or 465,
+            )
             mailbox = Mailbox(
                 user_id=user.id,
                 name=mailbox_name.strip() or "收件邮箱",
-                email_address=email_address.strip(),
+                email_address=normalized_email,
                 imap_host=imap_host.strip(),
-                imap_port=imap_port,
+                imap_port=imap_port or 993,
+                imap_tls=True if imap_tls is None else imap_tls,
                 username=username.strip(),
                 credential_encrypted=encrypt_secret(password),
                 smtp_host=smtp_host.strip(),
-                smtp_port=smtp_port,
-                folder=folder.strip() or "INBOX",
+                smtp_port=smtp_port or 465,
+                smtp_tls=True if smtp_tls is None else smtp_tls,
+                folder=normalized_folder,
             )
         db.add(mailbox)
         db.flush()
@@ -1306,6 +1418,7 @@ def create_task(
 def task_detail_page(
     request: Request,
     task_id: int,
+    run_id: int | None = None,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -1319,11 +1432,17 @@ def task_detail_page(
         notice = "测试邮件已发送，请检查收件箱。"
     elif request.query_params.get("run") == "failed":
         notice = "任务运行失败，请查看运行记录中的错误信息。"
+    elif request.query_params.get("run") == "queued":
+        notice = "任务已提交后台运行，请在下方运行窗口查看进度。"
+    elif request.query_params.get("run") == "busy":
+        notice = "该任务已有运行中的任务，请稍后查看运行窗口。"
     elif request.query_params.get("sync") == "failed":
         notice = "邮箱同步失败，请查看同步状态。"
     elif request.query_params.get("sync") == "ok":
         notice = "邮箱同步完成。"
-    return _render_task_page(request, user, db, task, notice=notice)
+    elif request.query_params.get("sync") == "queued":
+        notice = "同步已提交后台运行，请在下方运行窗口查看进度。"
+    return _render_task_page(request, user, db, task, notice=notice, selected_job_id=run_id)
 
 
 @router.post("/tasks/{task_id}/basic")
@@ -1338,7 +1457,7 @@ def update_task_basic(
     custom_cron: str = Form(""),
     timezone: str = Form(DEFAULT_TIMEZONE),
     lookback_hours: int = Form(24),
-    is_enabled: bool = Form(True),
+    is_enabled: bool = Form(False),
     csrf_token: str | None = Form(None),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -1387,12 +1506,14 @@ def update_task_mailbox(
     mailbox_name: str = Form("收件邮箱"),
     email_address: str = Form(""),
     imap_host: str = Form(""),
-    imap_port: int = Form(993),
+    imap_port: int | None = Form(None),
+    imap_tls: bool | None = Form(None),
     username: str = Form(""),
     password: str = Form(""),
     smtp_host: str = Form(""),
-    smtp_port: int = Form(465),
-    folder: str = Form("INBOX"),
+    smtp_port: int | None = Form(None),
+    smtp_tls: bool | None = Form(None),
+    folder: str = Form(""),
     csrf_token: str | None = Form(None),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -1402,17 +1523,59 @@ def update_task_mailbox(
     if task is None:
         return HTMLResponse("任务不存在", status_code=404)
     mailbox = db.get(Mailbox, task.mailbox_id)
+    effective_imap_port = imap_port or mailbox.imap_port
+    effective_smtp_port = smtp_port or mailbox.smtp_port
+    effective_imap_tls = mailbox.imap_tls if imap_tls is None else imap_tls
+    effective_smtp_tls = mailbox.smtp_tls if smtp_tls is None else smtp_tls
+    effective_folder = folder.strip() or mailbox.folder
+    try:
+        normalized_email, normalized_folder = _validate_mailbox_form(
+            email_address, imap_host, effective_imap_port, username, effective_folder,
+            smtp_host, effective_smtp_port,
+        )
+    except ValueError as exc:
+        return _render_task_page(
+            request, user, db, task, error=f"邮箱配置无效：{exc}",
+            mailbox_form={
+                **_mailbox_form_values(mailbox),
+                "name": mailbox_name,
+                "email_address": email_address,
+                "imap_host": imap_host,
+                "imap_port": effective_imap_port,
+                "imap_tls": effective_imap_tls,
+                "username": username,
+                "smtp_host": smtp_host,
+                "smtp_port": effective_smtp_port,
+                "smtp_tls": effective_smtp_tls,
+                "folder": effective_folder,
+            },
+        )
+    source_changed = any(
+        (
+            mailbox.email_address != normalized_email,
+            mailbox.imap_host != imap_host.strip(),
+            mailbox.imap_port != effective_imap_port,
+            mailbox.imap_tls != effective_imap_tls,
+            mailbox.username != username.strip(),
+            mailbox.folder != normalized_folder,
+        )
+    )
     mailbox.name = mailbox_name.strip() or "收件邮箱"
-    mailbox.email_address = email_address.strip()
+    mailbox.email_address = normalized_email
     mailbox.imap_host = imap_host.strip()
-    mailbox.imap_port = imap_port
+    mailbox.imap_port = effective_imap_port
+    mailbox.imap_tls = effective_imap_tls
     mailbox.username = username.strip()
     mailbox.smtp_host = smtp_host.strip()
-    mailbox.smtp_port = smtp_port
-    mailbox.folder = folder.strip() or "INBOX"
+    mailbox.smtp_port = effective_smtp_port
+    mailbox.smtp_tls = effective_smtp_tls
+    mailbox.folder = normalized_folder
     if password:
         mailbox.credential_encrypted = encrypt_secret(password)
-    mailbox.sync_error = None
+    if source_changed:
+        _reset_mailbox_sync_source(mailbox)
+    else:
+        mailbox.sync_error = None
     db.commit()
     return RedirectResponse(f"/tasks/{task.id}?saved=1", status_code=303)
 
@@ -1500,20 +1663,13 @@ def sync_task_mailbox(
     task = _owned_task(db, user, task_id)
     if task is None:
         return HTMLResponse("任务不存在", status_code=404)
-    mailbox = db.get(Mailbox, task.mailbox_id)
     try:
-        connector = _build_imap_connector(mailbox, get_settings())
-        MailSyncService(db, get_settings()).sync(mailbox, connector)
-        mailbox.sync_error = None
+        enqueue_job_run(session=db, task=task, user=user, run_kind="sync")
         db.commit()
-        return RedirectResponse(f"/tasks/{task.id}?sync=ok", status_code=303)
-    except Exception as exc:
+        return RedirectResponse(f"/tasks/{task.id}?sync=queued", status_code=303)
+    except ValueError:
         db.rollback()
-        mailbox = db.get(Mailbox, task.mailbox_id)
-        if mailbox:
-            mailbox.sync_error = error_message(exc, "邮箱同步失败")
-            db.commit()
-        return RedirectResponse(f"/tasks/{task.id}?sync=failed", status_code=303)
+        return RedirectResponse(f"/tasks/{task.id}?run=busy", status_code=303)
 
 
 @router.post("/tasks/{task_id}/run")
@@ -1528,17 +1684,94 @@ def run_task(
     task = _owned_task(db, user, task_id)
     if task is None:
         return HTMLResponse("任务不存在", status_code=404)
-    run_key = f"manual:{task.id}:{uuid4().hex}"
-    job = run_task_now(db, task, get_settings(), run_key, datetime.now(UTC))
-    db.commit()
-    if job.status == "success":
-        report = db.scalar(
-            select(Report).where(Report.task_id == task.id, Report.run_key == run_key)
+    try:
+        enqueue_job_run(session=db, task=task, user=user, run_kind="task")
+        db.commit()
+        return RedirectResponse(f"/tasks/{task.id}?run=queued", status_code=303)
+    except ValueError:
+        db.rollback()
+        return RedirectResponse(f"/tasks/{task.id}?run=busy", status_code=303)
+
+
+def _owned_job(db: Session, user: User, task_id: int, job_id: int) -> JobRun | None:
+    return db.scalar(
+        select(JobRun).where(
+            JobRun.id == job_id,
+            JobRun.task_id == task_id,
+            JobRun.user_id == user.id,
         )
-        if report is not None:
-            return RedirectResponse(f"/reports/{report.id}", status_code=303)
-        return RedirectResponse(f"/tasks/{task.id}?run=success", status_code=303)
-    return RedirectResponse(f"/tasks/{task.id}?run=failed", status_code=303)
+    )
+
+
+@router.get("/tasks/{task_id}/runs/{job_id}")
+def task_run_status(
+    task_id: int,
+    job_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    job = _owned_job(db, user, task_id, job_id)
+    if job is None:
+        return JSONResponse({"error": "运行记录不存在"}, status_code=404)
+    report = db.scalar(select(Report).where(Report.run_key == job.run_key))
+    details = job.details or {}
+    return {
+        "id": job.id,
+        "status": job.status,
+        "run_kind": job.run_kind,
+        "stage": job.stage,
+        "error_message": job.error_message,
+        "cancel_requested": job.cancel_requested,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "events": details.get("events", []),
+        "summary": details.get("summary", {}),
+        "report_id": report.id if report else None,
+    }
+
+
+@router.post("/tasks/{task_id}/runs/{job_id}/cancel")
+def cancel_task_run(
+    request: Request,
+    task_id: int,
+    job_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    job = _owned_job(db, user, task_id, job_id)
+    if job is None:
+        return HTMLResponse("运行记录不存在", status_code=404)
+    if job.status in ACTIVE_JOB_STATUSES:
+        job.cancel_requested = True
+        append_job_log(db, job, "已提交取消请求", level="warning")
+        db.commit()
+    return RedirectResponse(f"/tasks/{task_id}", status_code=303)
+
+
+@router.post("/tasks/{task_id}/runs/{job_id}/retry")
+def retry_task_run(
+    request: Request,
+    task_id: int,
+    job_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    task = _owned_task(db, user, task_id)
+    job = _owned_job(db, user, task_id, job_id)
+    if task is None or job is None:
+        return HTMLResponse("运行记录不存在", status_code=404)
+    if job.status not in {"failed", "canceled"}:
+        return RedirectResponse(f"/tasks/{task_id}", status_code=303)
+    try:
+        enqueue_job_run(db, task, user, run_kind=job.run_kind)
+        db.commit()
+    except ValueError:
+        db.rollback()
+    return RedirectResponse(f"/tasks/{task_id}?run=queued", status_code=303)
 
 
 @router.post("/tasks/{task_id}/toggle")
@@ -1853,8 +2086,9 @@ def add_task_target(
     task = _owned_task(db, user, task_id)
     if task is None:
         return HTMLResponse("任务不存在", status_code=404)
-    destination = destination.strip().lower()
-    if "@" not in destination:
+    try:
+        destination = normalize_recipient(destination)
+    except ValueError:
         return _render_task_page(request, user, db, task, error="投递邮箱格式无效")
     if any(item.destination == destination for item in task.delivery_targets):
         return _render_task_page(request, user, db, task, error="该投递邮箱已存在")
@@ -1884,8 +2118,9 @@ def edit_task_target(
     )
     if target is None:
         return HTMLResponse("投递目标不存在", status_code=404)
-    destination = destination.strip().lower()
-    if "@" not in destination:
+    try:
+        destination = normalize_recipient(destination)
+    except ValueError:
         return _render_task_page(request, user, db, task, error="投递邮箱格式无效")
     duplicate = db.scalar(
         select(TaskDeliveryTarget).where(
@@ -2342,7 +2577,13 @@ def _render_admin_users_page(
 def admin_models_page(
     request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)
 ):
-    return _render_admin_models_page(request, user, db, error=None)
+    return _render_admin_models_page(
+        request,
+        user,
+        db,
+        error=request.query_params.get("model_error"),
+        notice="模型连接验证成功。" if request.query_params.get("model_test") == "ok" else None,
+    )
 
 
 def _render_admin_models_page(
@@ -2350,6 +2591,7 @@ def _render_admin_models_page(
     user: User,
     db: Session,
     error: str | None,
+    notice: str | None = None,
     editing_profile: AIProviderProfile | None = None,
     model_form: dict | None = None,
 ):
@@ -2364,6 +2606,7 @@ def _render_admin_models_page(
         user=user,
         profiles=profiles,
         error=error,
+        notice=notice,
         editing_profile=editing_profile,
         model_form=model_form,
     )
@@ -2377,8 +2620,57 @@ def admin_jobs_page(
     return _render(request, "admin_jobs.html", user=user, jobs=jobs)
 
 
+@router.get("/admin/jobs/{job_id}")
+def admin_job_status(
+    job_id: int,
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    job = db.get(JobRun, job_id)
+    if job is None:
+        return JSONResponse({"error": "运行记录不存在"}, status_code=404)
+    details = job.details or {}
+    report = db.scalar(select(Report).where(Report.run_key == job.run_key))
+    return {
+        "id": job.id,
+        "status": job.status,
+        "run_kind": job.run_kind,
+        "stage": job.stage,
+        "error_message": job.error_message,
+        "cancel_requested": job.cancel_requested,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "events": details.get("events", []),
+        "summary": details.get("summary", {}),
+        "report_id": report.id if report else None,
+    }
+
+
+@router.post("/admin/jobs/{job_id}/cancel")
+def cancel_admin_job(
+    request: Request,
+    job_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    job = db.get(JobRun, job_id)
+    if job is None:
+        return HTMLResponse("运行记录不存在", status_code=404)
+    if job.status in ACTIVE_JOB_STATUSES:
+        job.cancel_requested = True
+        append_job_log(db, job, "管理员已提交取消请求", level="warning")
+        db.commit()
+    return RedirectResponse("/admin/jobs", status_code=303)
+
+
 def _validate_model_form(
+    name: str,
+    base_url: str,
+    model_name: str,
     role: str,
+    image_input: bool,
     timeout_seconds: float,
     max_retries: int,
     max_input_chars: int,
@@ -2386,8 +2678,17 @@ def _validate_model_form(
     max_images: int,
     max_image_size_mb: int,
 ) -> str | None:
+    if not name.strip() or len(name.strip()) > 160:
+        return "模型名称不能为空且不能超过 160 个字符"
+    parsed = urlparse(base_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "Base URL 必须是有效的 http 或 https 地址"
+    if len(model_name.strip()) > 255:
+        return "模型名称不能超过 255 个字符"
     if role not in {"primary", "vision"}:
         return "模型角色必须是 primary 或 vision"
+    if role == "vision" and not image_input:
+        return "Vision 视觉副模型必须启用图片输入能力"
     if not 1 <= timeout_seconds <= 600:
         return "模型超时时间必须在 1 到 600 秒之间"
     if not 0 <= max_retries <= 5:
@@ -2508,7 +2809,7 @@ def create_model_profile(
     model_name: str = Form(""),
     api_key: str = Form(""),
     image_input: bool = Form(False),
-    structured_output: bool = Form(True),
+    structured_output: bool = Form(False),
     timeout_seconds: float = Form(90.0),
     max_retries: int = Form(2),
     max_input_chars: int = Form(120_000),
@@ -2521,8 +2822,17 @@ def create_model_profile(
 ):
     validate_csrf(request, csrf_token)
     validation_error = _validate_model_form(
-        role, timeout_seconds, max_retries, max_input_chars, max_output_tokens,
-        max_images, max_image_size_mb,
+        name,
+        base_url,
+        model_name,
+        role,
+        image_input,
+        timeout_seconds,
+        max_retries,
+        max_input_chars,
+        max_output_tokens,
+        max_images,
+        max_image_size_mb,
     )
     if validation_error:
         model_form = _model_form_values(
@@ -2584,7 +2894,7 @@ def update_model_profile(
     model_name: str = Form(""),
     api_key: str = Form(""),
     image_input: bool = Form(False),
-    structured_output: bool = Form(True),
+    structured_output: bool = Form(False),
     timeout_seconds: float = Form(90.0),
     max_retries: int = Form(2),
     max_input_chars: int = Form(120_000),
@@ -2600,8 +2910,17 @@ def update_model_profile(
     if profile is None:
         return HTMLResponse("模型配置不存在", status_code=404)
     validation_error = _validate_model_form(
-        role, timeout_seconds, max_retries, max_input_chars, max_output_tokens,
-        max_images, max_image_size_mb,
+        name,
+        base_url,
+        model_name,
+        role,
+        image_input,
+        timeout_seconds,
+        max_retries,
+        max_input_chars,
+        max_output_tokens,
+        max_images,
+        max_image_size_mb,
     )
     if validation_error:
         model_form = _model_form_values(
@@ -2660,6 +2979,28 @@ def toggle_model_profile(
     profile.is_enabled = not profile.is_enabled
     db.commit()
     return RedirectResponse("/admin/models", status_code=303)
+
+
+@router.post("/admin/models/{profile_id}/test")
+def test_model_profile(
+    request: Request,
+    profile_id: int,
+    csrf_token: str | None = Form(None),
+    user: User = Depends(admin_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    profile = db.get(AIProviderProfile, profile_id)
+    if profile is None:
+        return HTMLResponse("模型配置不存在", status_code=404)
+    try:
+        AIProfileService(db, get_settings()).provider_for_profile(profile).test_connection()
+    except Exception as exc:
+        return RedirectResponse(
+            f"/admin/models?model_error={quote(f'连接测试失败：{error_message(exc)}')}",
+            status_code=303,
+        )
+    return RedirectResponse("/admin/models?model_test=ok", status_code=303)
 
 
 @router.post("/admin/models/{profile_id}/delete")

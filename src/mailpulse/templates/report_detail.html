@@ -2,10 +2,11 @@
 {% block title %}{{ report.title }} - MailPulse{% endblock %}
 {% block content %}
 <div class="page-heading">
-  <div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}{% if task %} · <a href="/tasks/{{ task.id }}">任务：{{ task.name }}</a>{% endif %}</p></div>
-  <span class="tag {{ report.status }}">{{ report.status }}</span>
+  <div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · 纳入 {{ report.summary.message_count }} 封邮件{% endif %}{% if report.summary.get('truncated') %} · 命中 {{ report.summary.matched_message_count }} 封，已按上限截断{% endif %}{% if task %} · <a href="/tasks/{{ task.id }}">任务：{{ task.name }}</a>{% endif %}</p></div>
+  <span class="tag {{ report.status }}">{{ {'success': '成功', 'failed': '失败', 'pending': '等待中'}.get(report.status, report.status) }}</span>
 </div>
 <section class="card report-card">
+  {% if report.summary.get('vision_degraded') %}<div class="notice">视觉副模型处理失败，本报告未使用或未验证图片视觉证据；主模型已继续生成结果。</div>{% endif %}
   <pre class="report-content">{{ report.rendered_markdown }}</pre>
 </section>
 <section class="card">
@@ -23,11 +24,11 @@
     {% for delivery in deliveries %}
     <div class="list-item">
       <span>{{ delivery.destination }}<small>尝试 {{ delivery.attempts }} 次 · {{ delivery.created_at | fmt_time }}{% if delivery.error_message %} · {{ delivery.error_message }}{% endif %}</small></span>
-      <span class="actions"><span class="tag {{ delivery.status }}">{{ delivery.status }}</span>{% if delivery.status == 'failed' %}<form method="post" action="/deliveries/{{ delivery.id }}/retry" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="重试中…">重试</button></form>{% endif %}</span>
+      <span class="actions"><span class="tag {{ delivery.status }}">{{ {'pending': '等待中', 'sending': '发送中', 'sent': '已发送', 'failed': '失败'}.get(delivery.status, delivery.status) }}</span>{% if delivery.status == 'failed' %}<form method="post" action="/deliveries/{{ delivery.id }}/retry" data-disable-on-submit><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit" data-processing-label="重试中…">重试</button></form>{% endif %}</span>
     </div>
     {% endfor %}
   </div>
   {% else %}<p class="empty">尚未投递。</p>{% endif %}
 </section>
-<section class="card"><h2>模型处理记录</h2><pre class="small-code">{{ report.model_trace | tojson(indent=2) }}</pre></section>
+<section class="card"><details><summary><strong>处理说明与诊断信息</strong></summary><p class="muted compact">详细信息仅包含阶段、模型和路由诊断，不包含邮箱密码、API Key、完整邮件正文或原始附件。</p><pre class="small-code">{{ report.model_trace | tojson(indent=2) }}</pre></details></section>
 {% endblock %}

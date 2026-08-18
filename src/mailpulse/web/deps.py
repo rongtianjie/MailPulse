@@ -9,8 +9,9 @@ from ..db import build_session_factory
 from ..models import User
 
 
-def get_db() -> Generator[Session, None, None]:
-    session = build_session_factory()()
+def get_db(request: Request) -> Generator[Session, None, None]:
+    factory = getattr(request.app.state, "session_factory", None) or build_session_factory()
+    session = factory()
     try:
         yield session
     finally:

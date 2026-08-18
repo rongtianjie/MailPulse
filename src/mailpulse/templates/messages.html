@@ -20,10 +20,10 @@
   </form>
   {% endif %}
   <nav class="filter-tabs">
-    <a class="{{ 'active' if status == '' else '' }}" href="/messages{% if query %}?q={{ query }}{% endif %}{% if mailbox_id %}{% if query %}&{% else %}?{% endif %}mailbox_id={{ mailbox_id }}{% endif %}">全部</a>
-    <a class="{{ 'active' if status == 'unprocessed' else '' }}" href="/messages?status=unprocessed{% if query %}&q={{ query }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">未处理</a>
-    <a class="{{ 'active' if status == 'processed' else '' }}" href="/messages?status=processed{% if query %}&q={{ query }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">已处理</a>
-    <a class="{{ 'active' if status == 'starred' else '' }}" href="/messages?status=starred{% if query %}&q={{ query }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">已加星</a>
+    <a class="{{ 'active' if status == '' else '' }}" href="/messages{% if query %}?q={{ query|urlencode }}{% endif %}{% if mailbox_id %}{% if query %}&{% else %}?{% endif %}mailbox_id={{ mailbox_id }}{% endif %}">全部</a>
+    <a class="{{ 'active' if status == 'unprocessed' else '' }}" href="/messages?status=unprocessed{% if query %}&q={{ query|urlencode }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">未处理</a>
+    <a class="{{ 'active' if status == 'processed' else '' }}" href="/messages?status=processed{% if query %}&q={{ query|urlencode }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">已处理</a>
+    <a class="{{ 'active' if status == 'starred' else '' }}" href="/messages?status=starred{% if query %}&q={{ query|urlencode }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">已加星</a>
   </nav>
   {% if messages %}
   <div class="list">
@@ -33,7 +33,7 @@
         <strong>{{ message.subject or '(无主题)' }}</strong>
         <p class="muted">{{ message.sender }} · {{ message.received_at | fmt_time }}</p>
         {% if message.local_labels %}
-        <p class="label-row">{% for label in message.local_labels %}<span class="tag label-tag">{{ label }}<form method="post" action="/messages/{{ message.id }}/labels/delete" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="label" value="{{ label }}"><button class="label-remove" type="submit" title="删除标签 {{ label }}" aria-label="删除标签 {{ label }}">×</button></form></span>{% endfor %}</p>
+        <div class="label-row">{% for label in message.local_labels %}<div class="tag label-tag">{{ label }}<form method="post" action="/messages/{{ message.id }}/labels/delete" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="label" value="{{ label }}"><button class="label-remove" type="submit" title="删除标签 {{ label }}" aria-label="删除标签 {{ label }}">×</button></form></div>{% endfor %}</div>
         {% endif %}
       </div>
       <span class="actions message-actions">
@@ -48,9 +48,9 @@
   </div>
   {% if pages > 1 %}
   <nav class="pagination">
-    {% if page > 1 %}<a class="button" href="/messages?page={{ page - 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">上一页</a>{% endif %}
+    {% if page > 1 %}<a class="button" href="/messages?page={{ page - 1 }}{% if query %}&q={{ query|urlencode }}{% endif %}{% if status %}&status={{ status|urlencode }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">上一页</a>{% endif %}
     <span class="muted">第 {{ page }} / {{ pages }} 页</span>
-    {% if page < pages %}<a class="button" href="/messages?page={{ page + 1 }}{% if query %}&q={{ query }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">下一页</a>{% endif %}
+    {% if page < pages %}<a class="button" href="/messages?page={{ page + 1 }}{% if query %}&q={{ query|urlencode }}{% endif %}{% if status %}&status={{ status|urlencode }}{% endif %}{% if mailbox_id %}&mailbox_id={{ mailbox_id }}{% endif %}">下一页</a>{% endif %}
   </nav>
   {% endif %}
   {% else %}<p class="empty">没有匹配邮件。</p>{% endif %}

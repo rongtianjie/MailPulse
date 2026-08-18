@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +29,14 @@ def message_content_hash(message: RawMessage) -> str:
         message.subject.strip().lower(),
         message.sender.strip().lower(),
         "\n".join(sorted(address.lower() for address in message.recipients)),
+        "\n".join(sorted(address.lower() for address in message.cc)),
+        message.received_at.isoformat() if message.received_at else "",
         message.body_text.strip(),
+        "\n".join(
+            f"{item.filename}|{item.mime_type}|{len(item.payload)}|"
+            f"{hashlib.sha256(item.payload).hexdigest()}"
+            for item in message.attachments
+        ),
     ]
     return hashlib.sha256("\n".join(parts).encode("utf-8", errors="replace")).hexdigest()
 
@@ -158,6 +166,7 @@ class MailSyncService:
             folder=mailbox.folder,
             uid_validity=uid_validity,
             uid=uid,
+            source_id=mailbox.sync_source_id,
             internal_date=raw.received_at,
         )
         self.session.add(occurrence)
@@ -221,7 +230,18 @@ class MailSyncService:
             relative = Path(str(canonical.owner_user_id)) / digest[:2] / f"{digest}-{safe_name}"
             target = self.settings.attachments_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(item.payload)
+            temporary_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=target.parent, prefix=f".{target.name}.", delete=False
+                ) as temporary:
+                    temporary.write(item.payload)
+                    temporary.flush()
+                    temporary_path = Path(temporary.name)
+                temporary_path.replace(target)
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
             self.session.add(
                 Attachment(
                     message_id=canonical.id,

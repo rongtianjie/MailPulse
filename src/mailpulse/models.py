@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -56,10 +57,14 @@ class Mailbox(Base):
     username: Mapped[str] = mapped_column(String(320))
     credential_encrypted: Mapped[str] = mapped_column(Text)
     folder: Mapped[str] = mapped_column(String(255), default="INBOX")
+    sync_source_id: Mapped[str] = mapped_column(
+        String(64), default=lambda: uuid4().hex, index=True
+    )
     sync_uid_validity: Mapped[str | None] = mapped_column(String(64), nullable=True)
     sync_last_uid: Mapped[int] = mapped_column(Integer, default=0)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active_run_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -90,6 +95,10 @@ class Task(Base):
     lookback_hours: Mapped[int] = mapped_column(Integer, default=24)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_scheduled_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    active_run_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -200,6 +209,7 @@ class MessageOccurrence(Base):
     folder: Mapped[str] = mapped_column(String(255), default="INBOX")
     uid_validity: Mapped[str] = mapped_column(String(64))
     uid: Mapped[int] = mapped_column(Integer)
+    source_id: Mapped[str] = mapped_column(String(64), default="legacy")
     internal_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
@@ -322,8 +332,13 @@ class JobRun(Base):
         ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
     )
     run_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    run_kind: Mapped[str] = mapped_column(String(32), default="task")
+    scheduled_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     stage: Mapped[str] = mapped_column(String(64), default="sync")
-    status: Mapped[str] = mapped_column(String(32), default="running")
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

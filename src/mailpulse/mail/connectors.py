@@ -164,9 +164,12 @@ class IMAPConnector:
                     "(UID BODY.PEEK[])",
                 )
                 if status != "OK":
-                    continue
+                    raise ConnectionError(
+                        f"IMAP FETCH 失败，UID {chunk[0]}-{chunk[-1]} 未同步"
+                    )
                 # imaplib returns a trailing non-tuple marker such as b")" for
                 # BODY fetches. Only tuple entries carry a message payload.
+                fetched_uids: set[int] = set()
                 for item in fetched:
                     if not isinstance(item, tuple) or len(item) != 2:
                         continue
@@ -177,6 +180,12 @@ class IMAPConnector:
                     if uid is None or uid <= last_uid:
                         continue
                     messages.append((uid, _parse_message(payload)))
+                    fetched_uids.add(uid)
+                if fetched_uids != set(chunk):
+                    missing = sorted(set(chunk) - fetched_uids)
+                    raise ConnectionError(
+                        f"IMAP FETCH 返回不完整，UID {missing[:5]} 未同步"
+                    )
             messages.sort(key=lambda item: item[0])
             return SyncBatch(
                 cursor=SyncCursor(

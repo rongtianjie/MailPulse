@@ -54,6 +54,8 @@ def init_database(settings: Settings | None = None) -> None:
     from .search import SearchService
 
     settings = settings or get_settings()
+    if not settings.resolved_database_url.startswith("sqlite"):
+        raise RuntimeError("当前版本仅支持文件型 SQLite 数据库和 SQLite FTS5 搜索")
     engine = build_engine(settings)
     Base.metadata.create_all(engine)
     index_state = SearchService.ensure_index(engine)

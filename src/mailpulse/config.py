@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     ai_max_input_chars: int = Field(default=120_000, ge=4_096)
     ai_max_retries: int = Field(default=2, ge=0, le=5)
     max_messages_per_report: int = Field(default=100, ge=1, le=1_000)
+    job_log_retention_days: int = Field(default=90, ge=1, le=3650)
+    job_log_retention_count: int = Field(default=100, ge=1, le=10_000)
+    job_worker_batch_size: int = Field(default=4, ge=1, le=100)
 
     max_attachment_bytes: int = Field(default=20 * 1024 * 1024, ge=1024)
     max_attachments_per_message: int = Field(default=20, ge=1, le=100)

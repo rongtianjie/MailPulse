@@ -17,7 +17,7 @@
     </form>
     <form method="post" action="/tasks/{{ task.id }}/delete" data-disable-on-submit>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="danger" type="submit" data-processing-label="删除中…" onclick="return confirm('确定删除任务「{{ task.name }}」？其筛选规则和投递渠道将一并删除。')">删除任务</button>
+      <button class="danger" type="submit" data-processing-label="删除中…" data-confirm-delete="{{ task.name }}">删除任务</button>
     </form>
   </span>
 </div>
@@ -26,26 +26,26 @@
 
 <section class="card" id="basic">
   <div class="section-heading"><h2>基本信息</h2></div>
-  <form method="post" action="/tasks/{{ task.id }}/basic" class="form-grid" data-disable-on-submit>
+  <form method="post" action="/tasks/{{ task.id }}/basic" class="form-grid" data-disable-on-submit data-schedule-form>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>任务名称<input name="name" value="{{ form.name }}" required></label>
     <label>执行方式<select name="run_mode">
       <option value="manual" {% if form.run_mode == 'manual' %}selected{% endif %}>手动运行</option>
       <option value="scheduled" {% if form.run_mode == 'scheduled' %}selected{% endif %}>定时运行</option>
     </select></label>
-    <label>计划类型<select name="schedule_type">
+    <label data-schedule-field="type">计划类型<select name="schedule_type">
       <option value="daily" {% if form.schedule_type == 'daily' %}selected{% endif %}>每日</option>
       <option value="weekly" {% if form.schedule_type == 'weekly' %}selected{% endif %}>每周</option>
       <option value="custom" {% if form.schedule_type == 'custom' %}selected{% endif %}>自定义 cron</option>
     </select></label>
-    <label>执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
-    <label>每周范围<select name="weekdays">
+    <label data-schedule-field="time">执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
+    <label data-schedule-field="weekdays">每周范围<select name="weekdays">
       <option value="mon-fri" {% if form.weekdays == 'mon-fri' %}selected{% endif %}>周一至周五</option>
       <option value="mon-sun" {% if form.weekdays == 'mon-sun' %}selected{% endif %}>每天</option>
       <option value="sat,sun" {% if form.weekdays == 'sat,sun' %}selected{% endif %}>周末</option>
       <option value="mon,wed,fri" {% if form.weekdays == 'mon,wed,fri' %}selected{% endif %}>周一、三、五</option>
     </select></label>
-    <label>自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
+    <label data-schedule-field="custom">自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
     <label>时区<input name="timezone" value="{{ form.timezone }}" required></label>
     <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="{{ form.lookback_hours }}" required></label>
     <label class="check"><input type="checkbox" name="is_enabled" {% if form.is_enabled %}checked{% endif %}> 启用该任务</label>
@@ -74,6 +74,7 @@
     <label>邮箱地址<input type="email" name="email_address" value="{{ mailbox_form.email_address }}" required></label>
     <label>IMAP 主机<input name="imap_host" value="{{ mailbox_form.imap_host }}" required></label>
     <label>IMAP 端口<input type="number" name="imap_port" value="{{ mailbox_form.imap_port }}" required></label>
+    <label>IMAP 加密<select name="imap_tls"><option value="true" {% if mailbox_form.imap_tls %}selected{% endif %}>TLS</option><option value="false" {% if not mailbox_form.imap_tls %}selected{% endif %}>非 TLS</option></select></label>
     <label>登录用户名<input name="username" value="{{ mailbox_form.username }}" required></label>
     <label>邮箱密码<input type="password" name="password" placeholder="留空表示不修改"></label>
     <label>同步文件夹<input name="folder" value="{{ mailbox_form.folder }}"></label>
@@ -83,6 +84,7 @@
       <div class="form-grid">
         <label>SMTP 主机<input name="smtp_host" value="{{ mailbox_form.smtp_host }}"></label>
         <label>SMTP 端口<input type="number" name="smtp_port" value="{{ mailbox_form.smtp_port }}"></label>
+        <label>SMTP 加密<select name="smtp_tls"><option value="true" {% if mailbox_form.smtp_tls %}selected{% endif %}>TLS</option><option value="false" {% if not mailbox_form.smtp_tls %}selected{% endif %}>非 TLS</option></label>
       </div>
     </details>
     <div class="form-actions">
@@ -191,16 +193,49 @@
 </section>
 
 <section class="card" id="runs">
-  <div class="section-heading"><h2>运行记录</h2></div>
-  {% if jobs %}
-  <div class="list">
-    {% for job in jobs %}
-    <div class="list-item">
-      <span><strong class="tag {{ 'success' if job.status == 'success' else ('failed' if job.status == 'failed' else ('running' if job.status == 'running' else 'pending')) }}">{{ job.status }}</strong><small>阶段 {{ job.stage }} · {{ job.started_at | fmt_time }}{% if job.finished_at %} 至 {{ job.finished_at | fmt_time }}{% endif %}{% if job.error_message %} · {{ job.error_message }}{% endif %}</small></span>
-      <span class="muted">{{ '定时' if job.run_key.startswith('schedule:') else '手动' }}</span>
+  <div class="section-heading"><div><h2>当前任务运行</h2><p class="muted">只显示当前任务的运行状态；日志默认折叠，点击展开查看。</p></div></div>
+  {% set monitor_job = active_job or latest_job %}
+  {% if monitor_job %}
+  <details class="run-log-panel" data-run-monitor data-reload-on-terminal="{{ 'true' if request.query_params.get('run') == 'queued' or request.query_params.get('sync') == 'queued' else 'false' }}" data-endpoint="/tasks/{{ task.id }}/runs/{{ monitor_job.id }}">
+    <summary>
+      <span><strong data-run-status-label>{{ '等待运行' if monitor_job.status == 'queued' else ('运行中' if monitor_job.status == 'running' else ('运行成功' if monitor_job.status == 'success' else ('已取消' if monitor_job.status == 'canceled' else '运行失败'))) }}</strong><small data-run-stage-label>阶段：{{ {'sync': '同步邮件', 'attachments': '附件处理', 'summarize': 'AI 归纳', 'delivery': '投递报告', 'complete': '完成'}.get(monitor_job.stage, monitor_job.stage) }} · {{ monitor_job.started_at | fmt_time }}</small></span>
+      <span class="tag {{ 'success' if monitor_job.status == 'success' else ('failed' if monitor_job.status in ['failed', 'canceled'] else ('running' if monitor_job.status == 'running' else 'pending')) }}" data-run-status>{{ {'queued': '等待中', 'running': '运行中', 'success': '成功', 'failed': '失败', 'canceled': '已取消'}.get(monitor_job.status, monitor_job.status) }}</span>
+    </summary>
+    <div class="run-log-body">
+      <div class="run-log-actions" data-run-actions>
+        {% if monitor_job.status in ['queued', 'running'] %}
+        <form method="post" action="/tasks/{{ task.id }}/runs/{{ monitor_job.id }}/cancel" data-disable-on-submit>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="secondary" type="submit" data-processing-label="取消中…">取消运行</button>
+        </form>
+        {% endif %}
+        {% if monitor_job.status in ['failed', 'canceled'] %}
+        <form method="post" action="/tasks/{{ task.id }}/runs/{{ monitor_job.id }}/retry" data-disable-on-submit>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="secondary" type="submit" data-processing-label="提交中…">重新运行</button>
+        </form>
+        {% endif %}
+        {% for report in reports %}{% if report.run_key == monitor_job.run_key %}<a class="button primary" data-run-report href="/reports/{{ report.id }}">查看报告</a>{% endif %}{% endfor %}
+      </div>
+      <p class="muted compact" data-run-error>{{ monitor_job.error_message or '' }}</p>
+      <p class="muted compact" data-run-summary></p>
+      <ol class="run-log-events" data-run-events>
+        {% for event in (monitor_job.details.get('events', []) if monitor_job.details else []) %}
+        <li class="run-log-event {{ event.level or 'info' }}"><time>{{ event.at | fmt_time }}</time><span>{{ event.message }}</span></li>
+        {% endfor %}
+      </ol>
     </div>
-    {% endfor %}
-  </div>
+  </details>
+  <details class="run-history"><summary>历史运行记录（当前任务）</summary>
+    <div class="list">
+      {% for job in jobs %}
+      <button type="button" class="list-item run-history-item" data-run-history-id="{{ job.id }}">
+        <span><strong>{{ '同步' if job.run_kind == 'sync' else '任务' }} · {{ '成功' if job.status == 'success' else ('失败' if job.status == 'failed' else ('取消' if job.status == 'canceled' else ('运行中' if job.status == 'running' else '等待中'))) }}</strong><small>阶段 {{ {'sync': '同步邮件', 'attachments': '附件处理', 'summarize': 'AI 归纳', 'delivery': '投递报告', 'complete': '完成'}.get(job.stage, job.stage) }} · {{ job.started_at | fmt_time }}{% if job.finished_at %} 至 {{ job.finished_at | fmt_time }}{% endif %}</small></span>
+        <span class="muted">查看</span>
+      </button>
+      {% endfor %}
+    </div>
+  </details>
   {% else %}<p class="empty">暂无运行记录。点击页面顶部「立即运行」开始。</p>{% endif %}
 </section>
 
@@ -210,7 +245,7 @@
   <div class="list">
     {% for report in reports %}
     <a class="list-item" href="/reports/{{ report.id }}">
-      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ {'success': '成功', 'failed': '失败', 'pending': '等待中'}.get(report.status, report.status) }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
       <span class="muted">{{ report.created_at | fmt_time }}</span>
     </a>
     {% endfor %}

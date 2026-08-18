@@ -15,7 +15,7 @@
   {% if reports %}<div class="list">
     {% for report in reports %}
     <a class="list-item" href="/reports/{{ report.id }}">
-      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}{% if report.task %} · 任务：{{ report.task.name }}{% endif %}</small></div>
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ {'success': '成功', 'failed': '失败', 'pending': '等待中'}.get(report.status, report.status) }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · 纳入 {{ report.summary.message_count }} 封邮件{% endif %}{% if report.summary.get('truncated') %} · 已按上限截断（命中 {{ report.summary.matched_message_count }} 封）{% endif %}{% if report.task %} · 任务：{{ report.task.name }}{% endif %}</small></div>
       <span class="muted">{{ report.created_at | fmt_time }}</span>
     </a>
     {% endfor %}

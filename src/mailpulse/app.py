@@ -9,7 +9,7 @@ from loguru import logger
 from starlette.middleware.sessions import SessionMiddleware
 
 from .config import get_settings
-from .db import bootstrap_database
+from .db import bootstrap_database, build_session_factory
 from .logging_config import configure_logging
 from .web.routes import router
 from .web.session import SessionCookiePolicyMiddleware
@@ -26,6 +26,12 @@ def create_app() -> FastAPI:
         console_logger.info("默认管理员密码: {}", bootstrap.password)
         console_logger.info("首次登录后可在账号设置中修改密码。")
     app = FastAPI(title="MailPulse", version="0.1.0")
+    app.state.session_factory = build_session_factory(settings)
+    app.state.db_engine = app.state.session_factory.kw["bind"]
+
+    @app.on_event("shutdown")
+    def _dispose_db_engine() -> None:
+        app.state.db_engine.dispose()
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.secret_key,

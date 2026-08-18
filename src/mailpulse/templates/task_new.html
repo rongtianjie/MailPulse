@@ -7,7 +7,7 @@
 </div>
 {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 {% if notice %}<div class="alert success">{{ notice }}</div>{% endif %}
-<form method="post" action="/tasks" data-disable-on-submit data-wizard>
+<form method="post" action="/tasks" data-disable-on-submit data-wizard data-active-step="{{ active_step }}" data-schedule-form>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="rules_json" id="rules-json" value="{{ rules_form | tojson | forceescape }}">
   <input type="hidden" name="targets_json" id="targets-json" value="{{ targets_form | tojson | forceescape }}">
@@ -26,19 +26,19 @@
         <option value="manual" {% if form.run_mode == 'manual' %}selected{% endif %}>手动运行（点击按钮生成报告）</option>
         <option value="scheduled" {% if form.run_mode == 'scheduled' %}selected{% endif %}>定时运行</option>
       </select></label>
-      <label>计划类型<select name="schedule_type">
+      <label data-schedule-field="type">计划类型<select name="schedule_type">
         <option value="daily" {% if form.schedule_type == 'daily' %}selected{% endif %}>每日</option>
         <option value="weekly" {% if form.schedule_type == 'weekly' %}selected{% endif %}>每周</option>
         <option value="custom" {% if form.schedule_type == 'custom' %}selected{% endif %}>自定义 cron</option>
       </select></label>
-      <label>执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
-      <label>每周范围<select name="weekdays">
+      <label data-schedule-field="time">执行时间<input type="time" name="scheduled_time" value="{{ form.scheduled_time }}"></label>
+      <label data-schedule-field="weekdays">每周范围<select name="weekdays">
         <option value="mon-fri" {% if form.weekdays == 'mon-fri' %}selected{% endif %}>周一至周五</option>
         <option value="mon-sun" {% if form.weekdays == 'mon-sun' %}selected{% endif %}>每天</option>
         <option value="sat,sun" {% if form.weekdays == 'sat,sun' %}selected{% endif %}>周末</option>
         <option value="mon,wed,fri" {% if form.weekdays == 'mon,wed,fri' %}selected{% endif %}>周一、三、五</option>
       </select></label>
-      <label>自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
+      <label data-schedule-field="custom">自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
       <label>时区<input name="timezone" value="{{ form.timezone }}" required></label>
       <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="{{ form.lookback_hours }}" required></label>
       <label class="check"><input type="checkbox" name="is_enabled" {% if form.is_enabled %}checked{% endif %}> 创建后启用</label>
@@ -53,7 +53,7 @@
     {% if mailboxes %}
     <label>复制已有邮箱配置<select name="copy_from">
       <option value="">不复制，手动填写</option>
-      {% for mailbox in mailboxes %}<option value="{{ mailbox.id }}">{{ mailbox.email_address }}（{{ mailbox.imap_host }}）</option>{% endfor %}
+      {% for mailbox in mailboxes %}<option value="{{ mailbox.id }}" data-mailbox-email="{{ mailbox.email_address }}" data-mailbox-name="{{ mailbox.name }}" data-imap-host="{{ mailbox.imap_host }}" data-imap-port="{{ mailbox.imap_port }}" data-imap-tls="{{ 'true' if mailbox.imap_tls else 'false' }}" data-mailbox-username="{{ mailbox.username }}" data-mailbox-folder="{{ mailbox.folder }}" data-smtp-host="{{ mailbox.smtp_host }}" data-smtp-port="{{ mailbox.smtp_port }}" data-smtp-tls="{{ 'true' if mailbox.smtp_tls else 'false' }}">{{ mailbox.email_address }}（{{ mailbox.imap_host }}）</option>{% endfor %}
     </select></label>
     <p class="muted compact">选择后 IMAP/SMTP 字段将沿用已有配置，密码无需重新填写。</p>
     {% endif %}
@@ -62,8 +62,9 @@
       <label>邮箱地址<input type="email" name="email_address" value="{{ mailbox_form.email_address }}" required></label>
       <label>IMAP 主机<input name="imap_host" value="{{ mailbox_form.imap_host }}" placeholder="如 imap.example.com" required></label>
       <label>IMAP 端口<input type="number" name="imap_port" value="{{ mailbox_form.imap_port }}" required></label>
+      <label>IMAP 加密<select name="imap_tls"><option value="true" {% if mailbox_form.imap_tls %}selected{% endif %}>TLS</option><option value="false" {% if not mailbox_form.imap_tls %}selected{% endif %}>非 TLS</option></select></label>
       <label>登录用户名<input name="username" value="{{ mailbox_form.username }}" required></label>
-      <label>邮箱密码<input type="password" name="password" value="{{ mailbox_form.password }}" required placeholder="首次配置必须填写"></label>
+      <label>邮箱密码<input type="password" name="password" placeholder="首次配置必须填写；复制已有邮箱可留空"></label>
       <label>同步文件夹<input name="folder" value="{{ mailbox_form.folder }}"></label>
     </div>
     <details class="smtp-optional">
@@ -72,6 +73,7 @@
       <div class="form-grid">
         <label>SMTP 主机<input name="smtp_host" value="{{ mailbox_form.smtp_host }}" placeholder="如 smtp.example.com"></label>
         <label>SMTP 端口<input type="number" name="smtp_port" value="{{ mailbox_form.smtp_port }}"></label>
+        <label>SMTP 加密<select name="smtp_tls"><option value="true" {% if mailbox_form.smtp_tls %}selected{% endif %}>TLS</option><option value="false" {% if not mailbox_form.smtp_tls %}selected{% endif %}>非 TLS</option></select></label>
       </div>
     </details>
     <div class="wizard-nav">

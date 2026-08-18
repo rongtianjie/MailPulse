@@ -178,7 +178,7 @@ def normalize_recipient(value: str) -> str:
         or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", address)
     ):
         raise ValueError("收件人必须是一个有效邮箱地址")
-    return address
+    return address.lower()
 
 
 def _safe_subject(value: str) -> str:
