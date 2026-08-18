@@ -49,6 +49,8 @@ cp .env.example .env
 登录密码：admin123
 ```
 
+以上凭据仅用于首次开发环境启动。生产环境应在 `.env` 中设置独立的管理员账号和强密码，并在首次登录后立即完成密码变更。
+
 启动网页服务：
 
 ```bash
@@ -69,12 +71,6 @@ uv run mailpulse init-db
 
 打开启动日志中显示的地址（默认 [http://127.0.0.1:8080](http://127.0.0.1:8080)）登录。`init-db` 和应用启动都会自动创建数据库表结构。
 
-开发阶段修改了数据库模型后，使用 `reset-db` 重置本地数据库（会删除全部本地数据）：
-
-```bash
-uv run mailpulse reset-db --confirm
-```
-
 `init` 命令仍用于显式创建一个自定义管理员账号：
 
 ```bash
@@ -91,6 +87,22 @@ uv run mailpulse reset-db --confirm
 
 执行前应先停止网页服务和后台 worker。该命令只删除数据库及其 SQLite `-wal`、`-shm` 文件，不删除附件、MarkItDown 转换结果和其他运行目录内容。
 
+该命令会删除全部本地数据库数据；开发阶段修改数据库模型后才使用。生产数据不得通过此命令迁移或修复。
+
+常用命令：
+
+| 命令 | 用途 | 适用范围 |
+| --- | --- | --- |
+| `uv run mailpulse serve` | 启动网页服务 | 开发与部署 |
+| `uv run mailpulse worker` | 启动后台任务 worker | 开发与部署 |
+| `uv run mailpulse init-db` | 创建缺失的表并初始化默认管理员 | 开发与部署 |
+| `uv run mailpulse init --admin-password '…'` | 显式创建管理员账号 | 初始化或运维 |
+| `uv run mailpulse reset-db --confirm` | 删除并重建本地 SQLite 数据库 | 仅开发 |
+| `uv run mailpulse seed-demo --username <user>` | 写入演示邮件 | 仅开发与测试 |
+| `uv run mailpulse run-once --username <user> --demo-ai` | 生成演示报告 | 仅开发与测试 |
+
+网页服务和后台 worker 是两个独立进程。手动运行、立即同步和定时任务都会进入 `JobRun` 队列；需要执行这些任务时，必须同时运行 worker。
+
 ## 配置说明
 
 配置项位于 `.env`，模板见 `.env.example`。生产环境至少需要设置：
@@ -104,11 +116,13 @@ uv run mailpulse reset-db --confirm
 - `MAILPULSE_REMEMBER_ME_DAYS`：勾选记住登录状态时的会话有效期，默认 30 天。
 - `MAILPULSE_SESSION_HTTPS_ONLY`：是否仅通过 HTTPS 发送 Session Cookie；生产 HTTPS 部署应设为 `true`。
 - `MAILPULSE_EXTERNAL_AI_ALLOWED`：是否允许访问本机以外的 AI 服务，默认 `false`。
-- `MAILPULSE_DATABASE_URL`：可选数据库 URL；未设置时使用 `var/mailpulse.sqlite3`。当前部署方案以文件型 SQLite 为准。
+- `MAILPULSE_DATABASE_URL`：数据库 URL；当前版本只支持文件型 SQLite，未设置时使用 `var/mailpulse.sqlite3`，并依赖 SQLite FTS5 全文搜索。
+- `MAILPULSE_REMEMBER_PASSWORD_DAYS`：启用“记住密码”时凭据 Cookie 的有效期，默认 30 天。
 
 生产环境应使用独立的随机密钥，并确保运行目录仅对应用账号可读写。密钥、邮箱密码和 AI API Key 不得提交到版本库。
 日志默认输出到控制台并写入 `var/logs/mailpulse.log`，按配置自动轮转和清理。默认管理员密码仅输出到控制台，不写入日志文件。
 登录页面的“记住登录状态”只延长签名 Session Cookie 的有效期，不保存密码。
+“记住密码”是独立选项，会将账号凭据加密后保存在浏览器 Cookie 中，仅用于登录页预填；生产环境建议只在受信任的浏览器中启用，并配合 HTTPS 使用。
 
 配置优先级分两类：`MAILPULSE_HOST` 和 `MAILPULSE_PORT` 遵循“命令行参数 > 环境变量 > `.env` > 代码默认值”；其他配置由 Pydantic Settings 按“环境变量 > `.env` > 代码默认值”解析。服务启动日志会分别显示 host 和 port 的实际来源。
 
@@ -172,7 +186,6 @@ uv run mailpulse worker
 
 - [架构说明](docs/architecture.md)
 - [运行与维护](docs/operations.md)
-- [项目计划](PLAN.md)
 
 ## 开发验证
 
@@ -189,6 +202,7 @@ uv run mailpulse run-once --username user --demo-ai
 uv run pytest
 uv run ruff check .
 uv run python -m mailpulse --help
+git diff --check
 ```
 
 测试使用 Fake IMAP、Fake SMTP 和 Fake AI Provider，不依赖真实公司邮箱或真实 AI 服务。真实 IMAP、SMTP、目标模型服务和生产部署仍需在目标环境单独验收。
