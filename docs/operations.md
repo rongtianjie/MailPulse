@@ -5,7 +5,6 @@
 要求：
 
 - Python 3.11–3.14
-- `uv`
 - 可访问的 IMAP/SMTP 服务
 - 已部署的 OpenAI-compatible 模型服务，或其他受支持的模型 Provider
 
@@ -13,6 +12,21 @@
 
 ```bash
 uv sync
+```
+
+上面的方式使用 `uv` 管理环境。如果不使用 `uv`，请使用 Conda 创建 Python 环境，再通过 `pip` 安装项目依赖；不要使用 `conda install` 安装项目依赖：
+
+```bash
+conda create -n mailpulse python=3.13
+conda activate mailpulse
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+激活 Conda 环境后，本文后续命令中的 `uv run` 可以去掉。例如，`uv run mailpulse serve` 改为 `python -m mailpulse serve`，`uv run mailpulse worker` 改为 `python -m mailpulse worker`。运行测试和代码检查前，额外安装开发工具：
+
+```bash
+python -m pip install pytest pytest-asyncio ruff
 ```
 
 ## 2. 配置环境变量

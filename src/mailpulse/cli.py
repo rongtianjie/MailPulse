@@ -14,7 +14,7 @@ from .models import User
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="mailpulse", description="MailPulse 内网邮件整理工具")
+    parser = argparse.ArgumentParser(prog="mailpulse", description="MailPulse 多用户邮件整理工具")
     subparsers = parser.add_subparsers(dest="command")
 
     serve = subparsers.add_parser("serve", help="启动网页服务")

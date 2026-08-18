@@ -1,6 +1,6 @@
 # MailPulse
 
-MailPulse 是面向公司内网的多用户邮件归纳整理工具。系统通过 IMAP 只读同步邮件，使用确定性规则筛选内容，再调用可配置的 AI 模型生成结构化报告，并通过网页和 SMTP 提供结果。
+MailPulse 是一个多用户邮件归纳整理工具。系统通过 IMAP 只读同步邮件，使用确定性规则筛选内容，再调用可配置的 AI 模型生成结构化报告，并通过网页和 SMTP 提供结果。
 
 ## 功能概览
 
@@ -36,6 +36,23 @@ uv run python -m mailpulse --help
 uv run pytest
 ```
 
+### 不使用 `uv`：Conda 环境 + `pip` 安装
+
+也可以使用 Conda 创建 Python 3.11–3.14 环境，但项目依赖和开发工具统一通过 `pip` 安装，不使用 `conda install`：
+
+```bash
+conda create -n mailpulse python=3.13
+conda activate mailpulse
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+激活 Conda 环境后，直接使用 `python -m mailpulse` 启动命令即可，不需要 `uv run`。需要运行测试和代码检查时，额外安装开发工具：
+
+```bash
+python -m pip install pytest pytest-asyncio ruff
+```
+
 复制配置模板并修改密钥：
 
 ```bash
@@ -55,6 +72,12 @@ cp .env.example .env
 
 ```bash
 uv run mailpulse serve
+```
+
+使用 Conda 环境时执行：
+
+```bash
+python -m mailpulse serve
 ```
 
 服务仅在首次创建默认管理员时打印上述登录信息。首次登录后会进入密码设置页面，可以立即修改，也可以暂时跳过。
@@ -169,6 +192,12 @@ Model:    按服务实际提供的模型名称填写
 
 ```bash
 uv run mailpulse worker
+```
+
+使用 Conda 环境时执行：
+
+```bash
+python -m mailpulse worker
 ```
 
 报告详情页支持通过 SMTP 手动发送和失败重试，并保存投递状态、尝试次数和错误信息。
