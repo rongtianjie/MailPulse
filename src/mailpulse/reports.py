@@ -17,8 +17,38 @@ def render_summary_markdown(
         "## 摘要",
         summary.summary or "暂无摘要。",
         "",
-        "## 行动项",
+        "## 覆盖范围",
+        (
+            f"纳入 {summary.coverage.summarized_message_count}/"
+            f"{summary.coverage.input_message_count} 封邮件"
+            f"（模式：{summary.coverage.mode}）"
+        ),
     ]
+    if summary.coverage.omitted_message_ids:
+        lines.append(
+            "- 未形成事实卡片的邮件："
+            + "、".join(str(value) for value in summary.coverage.omitted_message_ids)
+        )
+    if summary.coverage.truncated_message_ids:
+        lines.append(
+            "- 输入被截断的邮件："
+            + "、".join(str(value) for value in summary.coverage.truncated_message_ids)
+        )
+    if summary.coverage.warnings:
+        lines.extend([f"- {value}" for value in summary.coverage.warnings])
+    if summary.message_summaries:
+        lines.extend(["", "## 逐封邮件摘要"])
+        for item in summary.message_summaries:
+            title = f"邮件 {item.message_id}"
+            if item.subject:
+                title += f"：{item.subject}"
+            lines.extend([f"### {title}", item.summary or "暂无摘要。"])
+            if item.key_points:
+                lines.extend([f"- {value}" for value in item.key_points])
+    lines.extend([
+        "",
+        "## 行动项",
+    ])
     if summary.action_items:
         for item in summary.action_items:
             owner = f"（负责人：{item.owner}）" if item.owner else ""

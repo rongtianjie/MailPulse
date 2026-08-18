@@ -106,11 +106,23 @@ class ReportService:
             raise ValueError("当前时间范围内没有符合规则的邮件")
 
         converted = []
+        attachments_by_message: dict[int, list[Attachment]] = {
+            message.id: [] for message in messages
+        }
+        if messages:
+            for attachment in self.session.scalars(
+                select(Attachment).where(
+                    Attachment.message_id.in_([message.id for message in messages])
+                )
+            ):
+                attachments_by_message.setdefault(attachment.message_id, []).append(attachment)
+        attachment_ids_by_message: dict[int, list[int]] = {
+            message_id: [attachment.id for attachment in values]
+            for message_id, values in attachments_by_message.items()
+        }
         converter = MarkItDownAttachmentConverter(self.settings)
         for message in messages:
-            for attachment in self.session.scalars(
-                select(Attachment).where(Attachment.message_id == message.id)
-            ):
+            for attachment in attachments_by_message.get(message.id, []):
                 result = converter.convert(self.session, attachment)
                 converted.append((attachment.id, result))
 
@@ -124,11 +136,20 @@ class ReportService:
                 received_at=message_times.get(message.id) or message.received_at,
                 body_text=message.body_text,
                 thread_key=message.thread_key,
+                attachment_ids=attachment_ids_by_message.get(message.id, []),
             )
             for message in messages
         ]
         orchestrator = self._build_orchestrator(user, mailbox.id, use_demo_provider)
-        summary, trace = orchestrator.summarize(raw_messages, converted)
+        summary, trace = orchestrator.summarize(
+            raw_messages,
+            converted,
+            task_context={
+                "task_name": task.name,
+                "period_start": period_start.isoformat() if period_start else None,
+                "period_end": period_end.isoformat(),
+            },
+        )
         end = period_end
         start = min(
             (
@@ -207,6 +228,7 @@ class ReportService:
                 max_output_tokens=1800,
                 max_input_chars=self.settings.ai_max_input_chars,
                 retries=self.settings.ai_max_retries,
+                message_batch_size=self.settings.ai_message_batch_size,
             )
         resolved = AIProfileService(self.session, self.settings).resolve_for(user.id, mailbox_id)
         primary = resolved.primary or self._build_environment_provider("primary")
@@ -228,6 +250,7 @@ class ReportService:
                 timeout=self.settings.ai_timeout_seconds,
                 max_input_chars=self.settings.ai_max_input_chars,
                 retries=self.settings.ai_max_retries,
+                message_batch_size=self.settings.ai_message_batch_size,
             )
         raise RuntimeError("尚未配置 AI 主模型，请在管理控制台配置或设置 MAILPULSE_AI_BASE_URL")
 

@@ -160,13 +160,13 @@ uv run mailpulse reset-db --confirm
 
 如果没有在管理控制台绑定模型，也可以通过 `MAILPULSE_AI_BASE_URL`、`MAILPULSE_AI_MODEL` 等环境变量提供 Primary 回退配置；需要视觉副模型时，再配置对应的 `MAILPULSE_AI_VISION_*` 变量。默认策略只允许访问本机模型服务，访问其他地址前需要显式设置 `MAILPULSE_EXTERNAL_AI_ALLOWED=true`。
 
-附件处理流程如下：
+附件处理和归纳流程如下：
 
 ```text
-原始附件 → MarkItDown → Markdown 和图片资源 → 模型编排 → 结构化报告
+原始附件 → MarkItDown → Markdown 和图片资源 → 事实卡片提取 → 总报告汇总 → 结构化报告
 ```
 
-模型流程使用转换后的内容，不使用原生 PDF 或 Office 文件上传。每个模型配置均可独立设置输入长度、输出 token、超时、重试次数、图片数量和图片大小限制。
+模型流程使用转换后的内容，不使用原生 PDF 或 Office 文件上传。每个模型配置均可独立设置输入长度、输出 token、超时、重试次数、图片数量和图片大小限制。`MAILPULSE_AI_MESSAGE_BATCH_SIZE` 控制事实卡片提取的每批邮件数量，默认 8；单封邮件使用直接归纳路径，多封邮件先提取逐封事实卡片，再生成总报告。若某批事实卡片或最终汇总模型失败，系统保留已提取的事实卡片生成降级报告，并在覆盖范围中标记 `degraded` 和处理警告。
 
 本地 MLX 等 OpenAI-compatible 服务示例：
 

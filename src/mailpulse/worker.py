@@ -192,6 +192,52 @@ def _prune_job_logs(session, settings: Settings, now: datetime) -> None:
         session.commit()
 
 
+def _recover_stale_jobs(session, settings: Settings, now: datetime) -> None:
+    """Release jobs left running after a worker process interruption."""
+    cutoff = now - timedelta(hours=settings.job_stale_after_hours)
+    stale_job_ids = list(
+        session.scalars(
+            select(JobRun.id).where(
+                JobRun.status == "running", JobRun.started_at < cutoff
+            )
+        )
+    )
+    for job_id in stale_job_ids:
+        job = session.get(JobRun, job_id)
+        if job is None:
+            continue
+        error_message_text = "后台 worker 可能中断，已自动释放运行锁"
+        details = _job_details(job)
+        details.update({"error_type": "StaleJob", "failed_stage": job.stage})
+        updated = session.execute(
+            update(JobRun)
+            .where(
+                JobRun.id == job.id,
+                JobRun.status == "running",
+                JobRun.started_at < cutoff,
+            )
+            .values(
+                status="failed",
+                error_message=error_message_text,
+                finished_at=now,
+                details=details,
+            )
+        )
+        if updated.rowcount != 1:
+            session.expire(job)
+            continue
+        session.refresh(job)
+        _release_task_run(session, job.task_id, job.run_key)
+        append_job_log(
+            session,
+            job,
+            error_message_text,
+            stage=job.stage,
+            level="error",
+            commit=True,
+        )
+
+
 def run_due_tasks(settings: Settings | None = None) -> int:
     """Process queued jobs and enqueue/execute each reached Cron slot once."""
     settings = settings or get_settings()
@@ -199,6 +245,7 @@ def run_due_tasks(settings: Settings | None = None) -> int:
     completed = 0
     try:
         now = datetime.now(UTC)
+        _recover_stale_jobs(session, settings, now)
         _prune_job_logs(session, settings, now)
         queued = list(
             session.scalars(
@@ -393,6 +440,7 @@ def run_task_now(
         _claim_existing_job_task(session, task, run_key)
         job.stage = "sync"
         job.status = "running"
+        job.started_at = datetime.now(UTC)
         job.run_kind = run_kind
         job.cancel_requested = False
         job.error_message = None

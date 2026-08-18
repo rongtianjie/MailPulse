@@ -20,6 +20,7 @@ from mailpulse.ai.types import (
     GenerationRequest,
     GenerationResult,
     ImagePart,
+    MessageSummary,
     ModelCapabilities,
     ModelProfile,
     ModelRuntimePolicy,
@@ -62,6 +63,7 @@ from mailpulse.security import decrypt_secret, encrypt_secret, verify_password
 from mailpulse.web.rate_limit import LoginRateLimiter
 from mailpulse.worker import (
     _due_fire_time,
+    _recover_stale_jobs,
     build_cron_expression,
     enqueue_job_run,
     run_due_tasks,
@@ -385,6 +387,46 @@ def test_imap_batch_fetch_ignores_trailing_marker(monkeypatch):
     assert result.messages[0][0] == 1
 
 
+def test_imap_internal_date_is_separate_and_normalized_to_utc(monkeypatch):
+    raw = (
+        b"From: sender@example.com\n"
+        b"To: user@example.com\n"
+        b"Subject: Internal date\n"
+        b"Date: Thu, 14 Aug 2026 12:00:00 +0800\n"
+        b"Message-ID: <internal-date@example.com>\n\nBody"
+    )
+
+    class InternalDateClient:
+        def response(self, key):
+            return "OK", [b"7"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                return "OK", [b"1"]
+            return "OK", [
+                (b'1 (UID 1 INTERNALDATE "14-Aug-2026 13:00:00 +0800" BODY[] {5})', raw),
+                b")",
+            ]
+
+        def logout(self):
+            return "BYE", []
+
+    connector = IMAPConnector(
+        MailboxConnection(
+            host="fake",
+            port=993,
+            username="user@example.com",
+            password="secret",
+        )
+    )
+    monkeypatch.setattr(connector, "_open", lambda: InternalDateClient())
+
+    batch = connector.sync_messages()
+    message = batch.messages[0][1]
+    assert message.received_at == datetime(2026, 8, 14, 4, tzinfo=UTC)
+    assert message.internal_date == datetime(2026, 8, 14, 5, tzinfo=UTC)
+
+
 def test_search_count_applies_status_filter_with_fts(tmp_path):
     settings = make_settings(tmp_path)
     init_database(settings)
@@ -569,7 +611,7 @@ def test_ai_request_retries_transient_http_failure(monkeypatch):
     calls = []
 
     def fake_post(*args, **kwargs):
-        calls.append(kwargs["json"])
+        calls.append(json.loads(json.dumps(kwargs["json"])))
         if len(calls) == 1:
             return httpx.Response(503, request=httpx.Request("POST", "http://test"))
         return httpx.Response(
@@ -598,6 +640,44 @@ def test_ai_request_retries_transient_http_failure(monkeypatch):
     assert len(calls) == 2
 
 
+def test_ai_request_separates_system_prompt_and_falls_back_from_strict_schema(monkeypatch):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(json.loads(json.dumps(kwargs["json"])))
+        if len(calls) == 1:
+            return httpx.Response(400, request=httpx.Request("POST", "http://test"))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"summary":"ok"}'}}]},
+            request=httpx.Request("POST", "http://test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = OpenAICompatibleProvider(
+        ModelProfile(
+            name="test",
+            base_url="http://test/v1",
+            api_key=None,
+            model_name="test-model",
+            capabilities=ModelCapabilities(structured_output=True, strict_json_schema=True),
+        )
+    )
+    result = provider.generate(
+        GenerationRequest(
+            role="primary_summarizer",
+            content_parts=[TextPart("hello")],
+            system_prompt="system rules",
+            response_schema={"type": "object"},
+        )
+    )
+
+    assert result.parsed_json == {"summary": "ok"}
+    assert [item["role"] for item in calls[0]["messages"]] == ["system", "user"]
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[1]["response_format"]["type"] == "json_object"
+
+
 def test_image_content_preserves_converted_asset_mime_type(tmp_path):
     image = tmp_path / "scan.jpg"
     image.write_bytes(b"fake-jpeg")
@@ -620,6 +700,26 @@ def test_ai_source_validation_discards_unknown_evidence():
     }
     evidence = AIOrchestrator._parse_evidence(parsed, messages, attachments)
     assert [item.extracted_text for item in evidence] == ["valid"]
+
+
+def test_ai_source_validation_removes_unknown_action_refs():
+    summary = StructuredSummary(
+        summary="ok",
+        action_items=[
+            {
+                "action": "处理",
+                "source_refs": ["message:1", "message:999", "fake"],
+                "verified": True,
+            }
+        ],
+    )
+    AIOrchestrator._validate_summary_sources(
+        summary,
+        [RawMessage("1", "subject", "sender", [], [], None, "body", None)],
+        [],
+    )
+    assert summary.action_items[0].source_refs == ["message:1"]
+    assert summary.action_items[0].verified is True
 
 
 def test_markitdown_converts_attachment_to_markdown(tmp_path):
@@ -715,6 +815,101 @@ class RecordingProvider:
         if self.error:
             raise self.error
         return GenerationResult(str(self.response), self.response, self.name)
+
+
+def test_two_stage_summary_keeps_message_coverage_and_system_prompt():
+    primary = RecordingProvider("primary", {"summary": "汇总结果", "action_items": []})
+    orchestrator = AIOrchestrator(ModelRouter(primary, primary_image_input=False))
+    messages = [
+        RawMessage("1", "第一封", "a@example.com", [], [], None, "第一封正文", "thread-1"),
+        RawMessage("2", "第二封", "b@example.com", [], [], None, "第二封正文", "thread-1"),
+    ]
+
+    summary, trace = orchestrator.summarize(messages, [], {"task_name": "测试任务"})
+
+    assert primary.roles == ["message_extractor", "primary_summarizer"]
+    assert trace["aggregation_mode"] == "two_stage"
+    assert summary.coverage.input_message_count == 2
+    assert summary.coverage.summarized_message_count == 2
+    assert summary.coverage.mode == "degraded"
+    assert [item.message_id for item in summary.message_summaries] == [1, 2]
+    assert primary.requests[0].system_prompt
+    assert "不可信数据" in primary.requests[0].system_prompt
+    assert '"cc":[]' in primary.requests[0].content_parts[1].text
+
+
+def test_ai_json_repair_retries_when_schema_validation_fails():
+    class SequenceProvider(RecordingProvider):
+        def __init__(self):
+            super().__init__("primary", {})
+            self.responses = [
+                {"summary": "字段错误", "priority": "not-a-priority"},
+                {"summary": "修复后的摘要", "priority": "high"},
+            ]
+
+        def generate(self, request: GenerationRequest) -> GenerationResult:
+            self.roles.append(request.role)
+            self.requests.append(request)
+            response = self.responses.pop(0)
+            return GenerationResult(str(response), response, self.name)
+
+    primary = SequenceProvider()
+    orchestrator = AIOrchestrator(ModelRouter(primary, primary_image_input=False))
+    message = RawMessage("1", "主题", "sender@example.com", [], [], None, "正文", None)
+
+    summary, _trace = orchestrator.summarize([message], [])
+
+    assert summary.summary == "修复后的摘要"
+    assert primary.roles == ["primary_summarizer", "primary_summarizer_json_repair"]
+
+
+def test_message_data_truncation_keeps_each_record_parseable():
+    orchestrator = AIOrchestrator(
+        ModelRouter(RecordingProvider("primary", {"summary": "ok"}), False),
+        max_input_chars=4_096,
+    )
+    parts, included, truncated, _warnings = orchestrator._message_data_parts(
+        [
+            RawMessage("1", "主题一", "a@example.com", [], [], None, "x" * 10_000, None),
+            RawMessage("2", "主题二", "b@example.com", [], [], None, "y" * 10_000, None),
+        ],
+        [],
+        4_096,
+    )
+    records = [json.loads(line) for line in parts[0].text.splitlines()[1:]]
+    assert included == {1, 2}
+    assert truncated == {1, 2}
+    assert [item["message_id"] for item in records] == ["1", "2"]
+    assert all(item["body_truncated"] is True for item in records)
+
+
+def test_ai_input_budget_also_limits_large_metadata_and_card_payload():
+    orchestrator = AIOrchestrator(
+        ModelRouter(RecordingProvider("primary", {"summary": "ok"}), False),
+        max_input_chars=4_096,
+    )
+    message = RawMessage(
+        "1",
+        "主题" * 10_000,
+        "sender@example.com",
+        ["recipient@example.com"],
+        [],
+        None,
+        "正文" * 10_000,
+        None,
+    )
+    parts, _included, _truncated, _warnings = orchestrator._message_data_parts(
+        [message], [], 4_096
+    )
+    cards_text = orchestrator._cards_text(
+        [MessageSummary(message_id=1, subject="主题" * 10_000, summary="摘要" * 10_000)],
+        {},
+        [],
+        4_096,
+    )
+
+    assert len(parts[0].text) <= 1_024
+    assert len(cards_text) <= 1_024
 
 
 def test_model_profiles_apply_separate_runtime_policies(tmp_path):
@@ -975,6 +1170,63 @@ def test_worker_persists_safe_failure_state(tmp_path, monkeypatch):
         assert job.status == "failed"
         assert job.stage == "sync"
         assert "worker-secret" not in (job.error_message or "")
+    finally:
+        db.close()
+
+
+def test_worker_recovers_stale_running_job_and_releases_locks(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        secret_key="test-secret-key",
+        credential_key="test-credential-key",
+        job_stale_after_hours=1,
+    )
+    init_database(settings)
+    db = build_session_factory(settings)()
+    try:
+        user = create_user(db, "stale-worker", "password-123")
+        mailbox = Mailbox(
+            user_id=user.id,
+            email_address="stale@example.com",
+            imap_host="fake",
+            username="stale@example.com",
+            credential_encrypted=encrypt_secret("stale-secret", settings),
+        )
+        db.add(mailbox)
+        db.flush()
+        run_key = "manual:stale-job"
+        task = Task(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            active_run_key=run_key,
+            run_mode="manual",
+        )
+        mailbox.active_run_key = run_key
+        db.add(task)
+        db.flush()
+        now = datetime(2026, 8, 18, 12, tzinfo=UTC)
+        job = JobRun(
+            user_id=user.id,
+            mailbox_id=mailbox.id,
+            task_id=task.id,
+            run_key=run_key,
+            status="running",
+            stage="summarize",
+            started_at=now - timedelta(hours=2),
+            details={"events": []},
+        )
+        db.add(job)
+        db.commit()
+
+        _recover_stale_jobs(db, settings, now)
+        db.refresh(job)
+        db.refresh(task)
+        db.refresh(mailbox)
+
+        assert job.status == "failed"
+        assert job.details["error_type"] == "StaleJob"
+        assert task.active_run_key is None
+        assert mailbox.active_run_key is None
     finally:
         db.close()
 

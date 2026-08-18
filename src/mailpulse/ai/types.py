@@ -42,16 +42,47 @@ class SourceReference(BaseModel):
     quote: str | None = None
 
 
+class MessageSummary(BaseModel):
+    """A bounded, source-oriented summary for one input message."""
+
+    message_id: int
+    thread_key: str | None = None
+    subject: str = ""
+    received_at: str | None = None
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+    action_items: list[ActionItem] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+    source_refs: list[SourceReference] = Field(default_factory=list)
+
+
+class MessageExtractionResponse(BaseModel):
+    items: list[MessageSummary] = Field(default_factory=list)
+
+
+class SummaryCoverage(BaseModel):
+    input_message_count: int = 0
+    summarized_message_count: int = 0
+    omitted_message_ids: list[int] = Field(default_factory=list)
+    truncated_message_ids: list[int] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    mode: Literal["direct", "two_stage", "degraded"] = "direct"
+
+
 class StructuredSummary(BaseModel):
     category: str = "其他"
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     summary: str = ""
+    message_summaries: list[MessageSummary] = Field(default_factory=list)
     action_items: list[ActionItem] = Field(default_factory=list)
     decisions: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     questions: list[str] = Field(default_factory=list)
     source_refs: list[SourceReference] = Field(default_factory=list)
     attachment_status: list[str] = Field(default_factory=list)
+    coverage: SummaryCoverage = Field(default_factory=SummaryCoverage)
 
     @field_validator("priority", mode="before")
     @classmethod
@@ -141,6 +172,7 @@ ContentPart = TextPart | MarkdownPart | ImagePart | EvidencePart
 class GenerationRequest:
     role: str
     content_parts: list[ContentPart]
+    system_prompt: str | None = None
     response_schema: dict[str, Any] | None = None
     max_input_tokens: int | None = None
     max_output_tokens: int = 1800

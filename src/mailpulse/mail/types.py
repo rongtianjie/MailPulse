@@ -22,6 +22,8 @@ class RawMessage:
     body_text: str
     thread_key: str | None
     attachments: list[RawAttachment] = field(default_factory=list)
+    attachment_ids: list[int] = field(default_factory=list)
+    internal_date: datetime | None = None
 
 
 @dataclass(slots=True)

@@ -54,7 +54,7 @@ cp .env.example .env
 
 配置读取优先级为：`serve` 的 `--host`/`--port` 命令行参数 > 环境变量 > `.env` > 代码默认值；其他配置为环境变量 > `.env` > 代码默认值。`MAILPULSE_SESSION_HTTPS_ONLY` 用于控制 Session Cookie 是否仅通过 HTTPS 发送，HTTPS 部署应设为 `true`。`MAILPULSE_EXTERNAL_AI_ALLOWED` 默认为 `false`，用于阻止未经明确许可的外部 AI 内容发送。
 
-AI 的环境变量回退配置包括 Primary 与可选 Vision 服务地址、模型名称、API Key 和能力声明；`MAILPULSE_AI_TIMEOUT_SECONDS`、`MAILPULSE_AI_MAX_OUTPUT_TOKENS`、`MAILPULSE_AI_MAX_INPUT_CHARS`、`MAILPULSE_AI_MAX_RETRIES`、`MAILPULSE_MAX_MESSAGES_PER_REPORT` 控制默认运行限制。附件同步还受单文件大小、单封邮件附件数量、用户/全局存储配额以及图片资源限制控制，完整变量列表和默认值见 `.env.example`。
+AI 的环境变量回退配置包括 Primary 与可选 Vision 服务地址、模型名称、API Key 和能力声明；`MAILPULSE_AI_TIMEOUT_SECONDS`、`MAILPULSE_AI_MAX_OUTPUT_TOKENS`、`MAILPULSE_AI_MAX_INPUT_CHARS`、`MAILPULSE_AI_MAX_RETRIES`、`MAILPULSE_AI_MESSAGE_BATCH_SIZE`、`MAILPULSE_MAX_MESSAGES_PER_REPORT` 控制默认运行限制。多封邮件默认先按批次生成逐封事实卡片，再汇总为总报告；输入截断、事实卡片缺失和视觉降级会记录在报告覆盖范围与运行诊断中。若最终汇总模型失败，系统默认使用已生成的逐封事实卡片生成降级报告，不会丢弃本次归纳结果。`MAILPULSE_JOB_STALE_AFTER_HOURS` 控制 worker 重启后自动回收遗留运行锁的阈值，默认 6 小时。附件同步还受单文件大小、单封邮件附件数量、用户/全局存储配额以及图片资源限制控制，完整变量列表和默认值见 `.env.example`。
 
 ## 3. 初始化与启动
 

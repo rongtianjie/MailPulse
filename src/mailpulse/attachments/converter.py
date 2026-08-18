@@ -21,6 +21,7 @@ class ConvertedAttachment:
     warnings: list[str]
     status: str
     converter_version: str
+    message_id: int | None = None
 
 
 class MarkItDownAttachmentConverter:
@@ -62,14 +63,19 @@ class MarkItDownAttachmentConverter:
         if not markdown.strip():
             warnings.append("MarkItDown 未提取到有效 Markdown 文本")
         image_assets = self._collect_image_assets(source, attachment.mime_type, markdown, warnings)
-        target_dir = (
-            self.settings.conversions_dir
-            / str(attachment.message.owner_user_id)
-            / str(attachment.message_id)
-        )
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / f"{attachment.id}.md"
-        target.write_text(markdown, encoding="utf-8")
+        try:
+            target_dir = (
+                self.settings.conversions_dir
+                / str(attachment.message.owner_user_id)
+                / str(attachment.message_id)
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{attachment.id}.md"
+            target.write_text(markdown, encoding="utf-8")
+        except OSError as exc:
+            return self._finish(
+                session, attachment, "failed", f"无法保存转换结果: {type(exc).__name__}"
+            )
 
         attachment.markdown_path = str(target)
         attachment.image_assets = image_assets
@@ -85,6 +91,7 @@ class MarkItDownAttachmentConverter:
             warnings=warnings,
             status="converted",
             converter_version=self.converter_version,
+            message_id=attachment.message_id,
         )
 
     def _cached_result(self, attachment: Attachment) -> ConvertedAttachment | None:
@@ -110,6 +117,7 @@ class MarkItDownAttachmentConverter:
             warnings=list(attachment.conversion_warnings),
             status="converted",
             converter_version=attachment.converter_version or self.converter_version,
+            message_id=attachment.message_id,
         )
 
     def _collect_image_assets(
@@ -165,4 +173,5 @@ class MarkItDownAttachmentConverter:
             warnings=[warning],
             status=status,
             converter_version=self.converter_version,
+            message_id=attachment.message_id,
         )

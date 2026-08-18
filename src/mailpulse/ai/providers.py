@@ -65,17 +65,34 @@ class OpenAICompatibleProvider:
 
     def generate(self, request: GenerationRequest) -> GenerationResult:
         model_name = self.get_model_name()
+        messages = []
+        if request.system_prompt:
+            messages.append({"role": "system", "content": request.system_prompt})
+        messages.append({"role": "user", "content": self._content(request.content_parts)})
         payload = {
             "model": model_name,
-            "messages": [{"role": "user", "content": self._content(request.content_parts)}],
+            "messages": messages,
             "temperature": 0.1,
             "max_tokens": request.max_output_tokens,
         }
         if request.response_schema and self.profile.capabilities.structured_output:
-            payload["response_format"] = {"type": "json_object"}
+            if self.profile.capabilities.strict_json_schema:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": _schema_name(request.role),
+                        "strict": True,
+                        "schema": request.response_schema,
+                    },
+                }
+            else:
+                payload["response_format"] = {"type": "json_object"}
         response = self._post_with_retries(payload, request)
         if response.status_code == 400 and "response_format" in payload:
-            payload.pop("response_format")
+            if payload["response_format"].get("type") == "json_schema":
+                payload["response_format"] = {"type": "json_object"}
+            else:
+                payload.pop("response_format")
             response = self._post_with_retries(payload, request)
         response.raise_for_status()
         data = response.json()
@@ -141,3 +158,8 @@ class OpenAICompatibleProvider:
             elif isinstance(part, ImagePart):
                 content.append({"type": "image_url", "image_url": {"url": encode_image_part(part)}})
         return content
+
+
+def _schema_name(role: str) -> str:
+    value = "".join(char if char.isalnum() else "_" for char in role).strip("_")
+    return value or "mailpulse_response"

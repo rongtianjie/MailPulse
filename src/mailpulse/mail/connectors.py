@@ -5,7 +5,7 @@ import imaplib
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime
 from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import getaddresses, parsedate_to_datetime
@@ -32,6 +32,18 @@ def _chunks(values: list[int], size: int) -> Iterable[list[int]]:
 def _fetch_uid(header: bytes) -> int | None:
     match = re.search(rb"UID\s+(\d+)", header)
     return int(match.group(1)) if match else None
+
+
+def _fetch_internal_date(header: bytes) -> datetime | None:
+    match = re.search(rb'INTERNALDATE\s+"([^"]+)"', header, flags=re.IGNORECASE)
+    if not match:
+        return None
+    value = match.group(1).decode(errors="replace")
+    try:
+        parsed = datetime.strptime(value, "%d-%b-%Y %H:%M:%S %z")
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC)
 
 
 def _decode_header(value: str | None) -> str:
@@ -92,6 +104,8 @@ def _parse_message(raw: bytes) -> RawMessage:
             received_at = parsedate_to_datetime(message["Date"])
             if received_at.tzinfo is None:
                 received_at = received_at.replace(tzinfo=UTC)
+            else:
+                received_at = received_at.astimezone(UTC)
         except (TypeError, ValueError, IndexError):
             received_at = None
 
@@ -161,7 +175,7 @@ class IMAPConnector:
                 status, fetched = client.uid(
                     "FETCH",
                     ",".join(str(uid) for uid in chunk),
-                    "(UID BODY.PEEK[])",
+                    "(UID INTERNALDATE BODY.PEEK[])",
                 )
                 if status != "OK":
                     raise ConnectionError(
@@ -179,7 +193,11 @@ class IMAPConnector:
                     uid = _fetch_uid(header)
                     if uid is None or uid <= last_uid:
                         continue
-                    messages.append((uid, _parse_message(payload)))
+                    parsed_message = _parse_message(payload)
+                    parsed_message.internal_date = (
+                        _fetch_internal_date(header) or parsed_message.received_at
+                    )
+                    messages.append((uid, parsed_message))
                     fetched_uids.add(uid)
                 if fetched_uids != set(chunk):
                     missing = sorted(set(chunk) - fetched_uids)

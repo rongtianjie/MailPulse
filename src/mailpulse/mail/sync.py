@@ -132,6 +132,8 @@ class MailSyncService:
     ) -> bool:
         normalized_id = normalize_message_id(raw.message_id)
         content_hash = message_content_hash(raw)
+        received_at = _as_utc(raw.received_at)
+        internal_date = _as_utc(raw.internal_date or raw.received_at)
         if uid in existing["existing_uids"]:
             return False
 
@@ -148,7 +150,7 @@ class MailSyncService:
                 sender=raw.sender,
                 recipients=raw.recipients,
                 cc=raw.cc,
-                received_at=raw.received_at,
+                received_at=received_at,
                 body_text=raw.body_text,
                 thread_key=raw.thread_key,
             )
@@ -167,7 +169,7 @@ class MailSyncService:
             uid_validity=uid_validity,
             uid=uid,
             source_id=mailbox.sync_source_id,
-            internal_date=raw.received_at,
+            internal_date=internal_date,
         )
         self.session.add(occurrence)
         existing["existing_uids"].add(uid)
@@ -282,3 +284,11 @@ def _safe_filename(value: str) -> str:
     name = Path(value.replace("\\", "/")).name
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
     return (name or "attachment.bin")[:180]
+
+
+def _as_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
