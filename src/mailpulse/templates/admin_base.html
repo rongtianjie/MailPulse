@@ -10,7 +10,19 @@
     <a href="/admin/jobs" class="{{ 'active' if request.url.path.startswith('/admin/jobs') else '' }}">任务监控</a>
     <a href="/admin/account/password" class="{{ 'active' if request.url.path.startswith('/admin/account') else '' }}">账号设置</a>
   </nav>
-  <span class="session-user">{{ user.display_name }}</span>
-  <form class="session-actions" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button" type="submit">退出</button></form>
+  <div class="topbar-actions">
+    <span class="session-user">{{ user.display_name }} · 管理员模式</span>
+    {% if user.paired_user and not user.must_change_password %}
+      <form class="mode-switch-form" method="post" action="/switch-mode">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="mode" value="user">
+        <button class="link-button" type="submit">切换到用户模式</button>
+      </form>
+    {% endif %}
+    <form class="session-actions" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="link-button" type="submit">退出</button>
+    </form>
+  </div>
 </header>
 {% endblock %}

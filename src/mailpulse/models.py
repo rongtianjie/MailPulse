@@ -20,6 +20,9 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    paired_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, unique=True, index=True
+    )
     display_name: Mapped[str] = mapped_column(String(120), default="")
     password_hash: Mapped[str] = mapped_column(String(512))
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -29,6 +32,20 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
     )
+
+    paired_user: Mapped[User | None] = relationship(
+        "User",
+        remote_side="User.id",
+        foreign_keys="User.paired_user_id",
+        uselist=False,
+    )
+
+    @property
+    def display_username(self) -> str:
+        """Show the shared login name instead of a hidden paired identity name."""
+        if self.role == "user" and self.paired_user is not None:
+            return self.paired_user.username
+        return self.username
 
     mailboxes: Mapped[list[Mailbox]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

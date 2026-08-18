@@ -32,6 +32,26 @@ def authenticated_user(request: Request, db: Session = Depends(get_db)) -> User:
             status_code=status.HTTP_303_SEE_OTHER,
             headers={"Location": "/login"},
         )
+    # The session is client-side. Bind it to this concrete user record so a
+    # reset database cannot accidentally reuse an old cookie for a new user
+    # with the same numeric primary key.
+    if request.session.get("user_created_at") != user.created_at.isoformat():
+        request.session.clear()
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": "/login"},
+        )
+    expected_mode = "admin" if user.role == "admin" else "user"
+    login_mode = request.session.get("login_mode")
+    if login_mode is None:
+        # Keep sessions created before the dual-mode login change usable.
+        request.session["login_mode"] = expected_mode
+    elif login_mode != expected_mode:
+        request.session.clear()
+        raise HTTPException(
+            status_code=status.HTTP_303_SEE_OTHER,
+            headers={"Location": "/login"},
+        )
     return user
 
 

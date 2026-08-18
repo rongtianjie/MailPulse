@@ -72,13 +72,16 @@ def bootstrap_database(settings: Settings | None = None) -> DefaultAdminCredenti
     """Initialize schema and create the default administrator when needed."""
     settings = settings or get_settings()
     init_database(settings)
-    from .auth import create_user
+    from .auth import create_user, ensure_user_mode_identity
     from .models import User
 
     session = build_session_factory(settings)()
     try:
         existing_admin = session.scalar(select(User).where(User.role == "admin").limit(1))
         if existing_admin is not None:
+            if existing_admin.paired_user is None:
+                ensure_user_mode_identity(session, existing_admin)
+                session.commit()
             return None
         default_username = settings.default_admin_username.strip().lower()
         existing_account = session.scalar(

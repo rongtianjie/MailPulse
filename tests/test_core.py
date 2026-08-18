@@ -77,6 +77,15 @@ def make_settings(tmp_path) -> Settings:
     )
 
 
+def choose_login_mode(client, response, mode: str = "admin"):
+    token = re.search(r'name="csrf_token" value="([^"]+)"', response.text).group(1)
+    return client.post(
+        "/login/mode",
+        data={"mode": mode, "csrf_token": token},
+        follow_redirects=False,
+    )
+
+
 def test_password_and_credential_round_trip(tmp_path):
     settings = make_settings(tmp_path)
     encrypted = encrypt_secret("mail-password", settings)
@@ -141,10 +150,15 @@ def test_bootstrap_creates_default_admin_once(tmp_path):
 
     db = build_session_factory(settings)()
     try:
-        admin = db.query(User).one()
+        admin = db.query(User).filter(User.role == "admin").one()
         assert admin.role == "admin"
         assert admin.must_change_password is True
         assert authenticate(db, first.username, first.password) is admin
+        paired = admin.paired_user
+        assert paired is not None
+        assert paired.role == "user"
+        assert paired.username.startswith("__admin_user_")
+        assert paired.password_hash == admin.password_hash
     finally:
         db.close()
 
@@ -1261,10 +1275,16 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         data={"username": admin.username, "password": "password-123", "csrf_token": token},
     )
     assert response.status_code == 200
-    assert "系统概览" in response.text
-    assert 'href="/messages"' not in response.text
-    assert 'href="/reports"' not in response.text
-    assert "生成报告" not in response.text
+    assert "用户模式" in response.text
+    response = choose_login_mode(admin_client, response)
+    assert response.status_code == 303
+    admin_dashboard = admin_client.get("/admin")
+    assert "系统概览" in admin_dashboard.text
+    assert '<header class="topbar admin-topbar">' in admin_dashboard.text
+    assert 'class="topbar-actions"' in admin_dashboard.text
+    assert 'href="/messages"' not in admin_dashboard.text
+    assert 'href="/reports"' not in admin_dashboard.text
+    assert "生成报告" not in admin_dashboard.text
     assert admin_client.get("/").status_code == 403
     for user_path in [
         "/tasks",
@@ -1272,8 +1292,8 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         "/reports",
     ]:
         assert admin_client.get(user_path).status_code == 403
-    # 账号设置对任何已登录用户开放（含管理员）
-    assert admin_client.get("/account").status_code == 200
+    # 管理员模式与用户模式的账号设置彼此隔离
+    assert admin_client.get("/account").status_code == 403
     assert admin_client.get("/admin/users").status_code == 200
     assert admin_client.get("/admin/models").status_code == 200
     assert admin_client.get("/admin/jobs").status_code == 200
@@ -1333,6 +1353,9 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     )
     assert user_response.status_code == 200
     assert "任务状态" in user_response.text
+    assert '<header class="topbar user-topbar">' in user_response.text
+    assert 'class="main-nav user-nav"' in user_response.text
+    assert 'class="side-nav"' not in user_response.text
     assert 'href="/admin"' not in user_response.text
     for admin_path in ["/admin", "/admin/users", "/admin/models", "/admin/jobs"]:
         assert user_client.get(admin_path).status_code == 403
@@ -1485,6 +1508,78 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     assert other_client.get("/admin").status_code == 403
 
 
+def test_admin_login_can_choose_and_switch_fully_separate_user_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "dual-mode-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    db = build_session_factory(settings)()
+    admin = create_user(db, "dualadmin", "password-123", role="admin")
+    db.commit()
+    paired_id = admin.paired_user.id
+    db.close()
+
+    client = TestClient(app)
+    login_page = client.get("/login")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    choice = client.post(
+        "/login",
+        data={"username": "dualadmin", "password": "password-123", "csrf_token": token},
+    )
+    assert choice.status_code == 200
+    assert "管理员模式" in choice.text and "用户模式" in choice.text
+
+    entered_user = choose_login_mode(client, choice, "user")
+    assert entered_user.status_code == 303
+    assert entered_user.headers["location"] == "/"
+    dashboard = client.get("/")
+    assert "切换到管理员模式" in dashboard.text
+    assert client.get("/admin", follow_redirects=False).status_code == 403
+
+    account = client.get("/account")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', account.text).group(1)
+    changed = client.post(
+        "/account",
+        data={
+            "current_password": "password-123",
+            "new_password": "user-password-456",
+            "confirm_password": "user-password-456",
+            "csrf_token": token,
+        },
+    )
+    assert changed.status_code == 200
+    db = build_session_factory(settings)()
+    try:
+        admin_row = db.query(User).filter(User.username == "dualadmin").one()
+        assert verify_password("user-password-456", admin_row.password_hash)
+    finally:
+        db.close()
+
+    token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    client.post("/demo/seed", data={"csrf_token": token})
+    db = build_session_factory(settings)()
+    try:
+        assert db.query(Task).filter(Task.user_id == paired_id).count() == 1
+        assert db.query(Task).filter(Task.user_id == admin.id).count() == 0
+    finally:
+        db.close()
+
+    dashboard = client.get("/")
+    token = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    switched = client.post(
+        "/switch-mode",
+        data={"mode": "admin", "csrf_token": token},
+        follow_redirects=False,
+    )
+    assert switched.status_code == 303
+    assert switched.headers["location"] == "/admin"
+    assert client.get("/admin").status_code == 200
+    assert client.get("/").status_code == 403
+
+
 def test_self_registration_creates_regular_user_only(tmp_path, monkeypatch):
     monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("MAILPULSE_SECRET_KEY", "register-test-secret")
@@ -1627,6 +1722,9 @@ def test_default_admin_can_skip_initial_password_change(tmp_path, monkeypatch):
             "csrf_token": login_token,
         },
     )
+    selected = choose_login_mode(client, response)
+    assert selected.status_code == 303
+    response = client.get(selected.headers["location"])
     assert response.status_code == 200
     assert response.url.path == "/admin/account/password"
     assert "修改管理员密码" in response.text
@@ -1654,8 +1752,9 @@ def test_default_admin_can_skip_initial_password_change(tmp_path, monkeypatch):
             "csrf_token": login_token,
         },
     )
-    assert logged_in_again.status_code == 200
-    assert logged_in_again.url.path == "/admin"
+    logged_in_again = choose_login_mode(client, logged_in_again)
+    assert logged_in_again.status_code == 303
+    assert logged_in_again.headers["location"] == "/admin"
 
 
 def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
@@ -1675,6 +1774,9 @@ def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
             "csrf_token": login_token,
         },
     )
+    selected = choose_login_mode(client, response)
+    assert selected.status_code == 303
+    response = client.get(selected.headers["location"])
     password_token = re.search(r'name="csrf_token" value="([^"]+)"', response.text).group(1)
     changed = client.post(
         "/admin/account/password",
@@ -1714,8 +1816,9 @@ def test_default_admin_can_change_initial_password(tmp_path, monkeypatch):
             "csrf_token": login_token,
         },
     )
-    assert new_password.status_code == 200
-    assert new_password.url.path == "/admin"
+    new_password = choose_login_mode(client, new_password)
+    assert new_password.status_code == 303
+    assert new_password.headers["location"] == "/admin"
 
 
 def test_unauthenticated_routes_redirect_to_login(tmp_path, monkeypatch):
@@ -1735,6 +1838,33 @@ def test_unauthenticated_routes_redirect_to_login(tmp_path, monkeypatch):
     assert dashboard.headers["location"] == "/login"
     assert admin.status_code == 303
     assert admin.headers["location"] == "/login"
+
+
+def test_session_from_recreated_database_redirects_to_login(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAILPULSE_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MAILPULSE_SECRET_KEY", "database-recreate-session-test-secret")
+    get_settings.cache_clear()
+    from mailpulse.app import create_app
+
+    app = create_app()
+    settings = get_settings()
+    old_client = TestClient(app)
+    login_page = old_client.get("/login")
+    login_token = re.search(r'name="csrf_token" value="([^"]+)"', login_page.text).group(1)
+    choice = old_client.post(
+        "/login",
+        data={"username": "admin", "password": "admin123", "csrf_token": login_token},
+    )
+    selected = choose_login_mode(old_client, choice, "admin")
+    assert selected.status_code == 303
+    old_session = old_client.cookies.get("mailpulse_session")
+
+    reset_database(settings)
+    new_client = TestClient(create_app())
+    new_client.cookies.set("mailpulse_session", old_session)
+    root = new_client.get("/", follow_redirects=False)
+    assert root.status_code == 303
+    assert root.headers["location"] == "/login"
 
 
 def test_login_remember_me_controls_cookie_persistence(tmp_path, monkeypatch):
@@ -1810,7 +1940,7 @@ def test_login_remember_password_prefills_and_clears_cookie(tmp_path, monkeypatc
         },
         follow_redirects=False,
     )
-    assert response.status_code == 303
+    assert response.status_code == 200
     remember_cookie = next(
         item
         for item in response.headers.get_list("set-cookie")
@@ -1856,7 +1986,7 @@ def test_login_remember_password_prefills_and_clears_cookie(tmp_path, monkeypatc
         },
         follow_redirects=False,
     )
-    assert cleared.status_code == 303
+    assert cleared.status_code == 200
     cleared_cookie = next(
         item
         for item in cleared.headers.get_list("set-cookie")

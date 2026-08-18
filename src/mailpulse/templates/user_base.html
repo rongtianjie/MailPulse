@@ -1,33 +1,29 @@
 {% extends "base.html" %}
 {% block body_class %}app-mode{% endblock %}
 {% block header %}
-<header class="sidebar">
-  <div class="sidebar-brand">
-    <a class="brand" href="/">MailPulse</a>
-    <span class="brand-sub">邮件归纳工作台</span>
-  </div>
-  <nav class="side-nav" aria-label="工作台导航">
-    <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">
-      <span class="nav-icon">◈</span>概览
-    </a>
-    <a href="/tasks" class="{{ 'active' if request.url.path.startswith('/tasks') else '' }}">
-      <span class="nav-icon">▤</span>任务
-    </a>
-    <a href="/messages" class="{{ 'active' if request.url.path.startswith('/messages') else '' }}">
-      <span class="nav-icon">✉</span>邮件
-    </a>
-    <a href="/reports" class="{{ 'active' if request.url.path.startswith('/reports') else '' }}">
-      <span class="nav-icon">▣</span>报告
-    </a>
+<header class="topbar user-topbar">
+  <a class="brand user-brand" href="/">MailPulse <span>Workspace</span></a>
+  <nav class="main-nav user-nav" aria-label="工作台导航">
+    <a href="/" class="{{ 'active' if request.url.path == '/' else '' }}">概览</a>
+    <a href="/tasks" class="{{ 'active' if request.url.path.startswith('/tasks') else '' }}">任务</a>
+    <a href="/messages" class="{{ 'active' if request.url.path.startswith('/messages') else '' }}">邮件</a>
+    <a href="/reports" class="{{ 'active' if request.url.path.startswith('/reports') else '' }}">报告</a>
   </nav>
-  <div class="sidebar-footer">
-    <a href="/account" class="account-link {{ 'active' if request.url.path.startswith('/account') else '' }}">
+  <div class="topbar-actions">
+    <a href="/account" class="topbar-account {{ 'active' if request.url.path.startswith('/account') else '' }}">
       <span class="avatar">{{ user.display_name[:1] }}</span>
-      <span class="account-meta"><strong>{{ user.display_name }}</strong><small>{{ user.username }}</small></span>
+      <span class="topbar-account-meta"><strong>{{ user.display_name }}</strong><small>{{ user.display_username }}</small></span>
     </a>
-    <form method="post" action="/logout">
+    {% if user.paired_user and user.paired_user.role == 'admin' %}
+      <form class="mode-switch-form" method="post" action="/switch-mode">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="mode" value="admin">
+        <button class="link-button" type="submit">切换到管理员模式</button>
+      </form>
+    {% endif %}
+    <form class="session-actions" method="post" action="/logout">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="link-button logout" type="submit">退出登录</button>
+      <button class="link-button" type="submit">退出</button>
     </form>
   </div>
 </header>

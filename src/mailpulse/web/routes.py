@@ -11,11 +11,11 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..ai.profile_service import AIProfileService
-from ..auth import authenticate, create_user, set_password
+from ..auth import authenticate, create_user, ensure_user_mode_identity, set_password
 from ..config import get_settings
 from ..delivery import ReportDeliveryService, SMTPConfig, SMTPDeliveryProvider, normalize_recipient
 from ..demo import seed_demo
@@ -38,7 +38,7 @@ from ..models import (
 )
 from ..rules import MATCH_ALL, RuleService
 from ..search import SearchService
-from ..security import decrypt_secret, encrypt_secret
+from ..security import decrypt_secret, encrypt_secret, verify_password
 from ..worker import (
     append_job_log,
     build_cron_expression,
@@ -58,6 +58,7 @@ MESSAGES_PAGE_SIZE = 50
 REMEMBER_PASSWORD_COOKIE = "mailpulse_remember_credentials"
 TASK_RUN_STAGES = {"sync", "attachments", "summarize", "delivery", "complete"}
 ACTIVE_JOB_STATUSES = {"queued", "running"}
+LOGIN_MODE_PENDING_SECONDS = 300
 
 
 def _remember_password_saved(request: Request, settings) -> tuple[str, str] | None:
@@ -137,6 +138,29 @@ def _login_redirect(user: User) -> str:
     return "/"
 
 
+def _pending_admin(request: Request, db: Session) -> User | None:
+    pending_id = request.session.get("pending_login_admin_id")
+    pending_at = request.session.get("pending_login_at")
+    if not pending_id or not pending_at:
+        return None
+    if datetime.now(UTC).timestamp() - float(pending_at) > LOGIN_MODE_PENDING_SECONDS:
+        request.session.clear()
+        return None
+    admin = db.get(User, int(pending_id))
+    if admin is None or not admin.is_active or admin.role != "admin":
+        request.session.clear()
+        return None
+    return admin
+
+
+def _login_mode_context(request: Request, admin: User, error: str | None = None) -> dict:
+    return {
+        **_login_page_context(request, error=error, username=admin.username),
+        "mode_choice": True,
+        "pending_admin": admin,
+    }
+
+
 def _login_page_context(
     request: Request,
     *,
@@ -171,9 +195,16 @@ def login_page(request: Request, db: Session = Depends(get_db)):
     user_id = request.session.get("user_id")
     if user_id:
         user = db.get(User, int(user_id))
-        if user and user.is_active:
+        if (
+            user
+            and user.is_active
+            and request.session.get("user_created_at") == user.created_at.isoformat()
+        ):
             return RedirectResponse(_login_redirect(user), status_code=303)
         request.session.clear()
+    pending_admin = _pending_admin(request, db)
+    if pending_admin is not None:
+        return _render(request, "login.html", **_login_mode_context(request, pending_admin))
     return _render(
         request,
         "login.html",
@@ -215,8 +246,24 @@ def login(
             ),
         )
     limiter.clear(client_key)
+    if user.role == "admin":
+        ensure_user_mode_identity(db, user)
+        request.session.clear()
+        request.session["pending_login_admin_id"] = user.id
+        request.session["pending_login_at"] = datetime.now(UTC).timestamp()
+        request.session["pending_remember_me"] = remember_me
+        request.session["remember_me"] = remember_me
+        db.commit()
+        response = _render(request, "login.html", **_login_mode_context(request, user))
+        if remember_password:
+            _set_remember_password_cookie(response, user.username, password, get_settings())
+        else:
+            _clear_remember_password_cookie(response)
+        return response
     request.session.clear()
     request.session["user_id"] = user.id
+    request.session["user_created_at"] = user.created_at.isoformat()
+    request.session["login_mode"] = "user"
     request.session["remember_me"] = remember_me
     db.add(
         AuditLog(actor_user_id=user.id, action="login", target_type="user", target_id=str(user.id))
@@ -228,6 +275,46 @@ def login(
     else:
         _clear_remember_password_cookie(response)
     return response
+
+
+@router.post("/login/mode", response_class=HTMLResponse)
+def choose_login_mode(
+    request: Request,
+    mode: str = Form(...),
+    csrf_token: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    admin = _pending_admin(request, db)
+    if admin is None:
+        return RedirectResponse("/login", status_code=303)
+    if mode not in {"admin", "user"}:
+        return _render(
+            request, "login.html", **_login_mode_context(request, admin, "登录身份选择无效")
+        )
+    paired = ensure_user_mode_identity(db, admin)
+    target = admin if mode == "admin" else paired
+    if not target.is_active:
+        return _render(
+            request, "login.html", **_login_mode_context(request, admin, "目标身份已停用")
+        )
+    remember_me = bool(request.session.get("pending_remember_me"))
+    request.session.clear()
+    request.session["user_id"] = target.id
+    request.session["user_created_at"] = target.created_at.isoformat()
+    request.session["login_mode"] = mode
+    request.session["remember_me"] = remember_me
+    db.add(
+        AuditLog(
+            actor_user_id=target.id,
+            action="login",
+            target_type="user",
+            target_id=str(target.id),
+            metadata_json={"login_mode": mode, "credential_user_id": admin.id},
+        )
+    )
+    db.commit()
+    return RedirectResponse(_login_redirect(target), status_code=303)
 
 
 @router.post("/logout")
@@ -316,6 +403,7 @@ def change_admin_password(
     if new_password != confirm_password:
         return _render(request, "admin_password.html", user=user, error="两次输入的密码不一致")
     try:
+        ensure_user_mode_identity(db, user)
         set_password(user, new_password)
         db.add(
             AuditLog(
@@ -340,7 +428,9 @@ def skip_admin_password_change(
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
+    ensure_user_mode_identity(db, user)
     user.must_change_password = False
+    user.paired_user.must_change_password = False
     db.add(
         AuditLog(
             actor_user_id=user.id,
@@ -359,7 +449,7 @@ def skip_admin_password_change(
 
 
 @router.get("/account", response_class=HTMLResponse)
-def account_page(request: Request, user: User = Depends(authenticated_user)):
+def account_page(request: Request, user: User = Depends(current_user)):
     return _render(request, "account.html", user=user, password_error=None, name_saved=False)
 
 
@@ -371,13 +461,13 @@ def update_account(
     new_password: str = Form(""),
     confirm_password: str = Form(""),
     csrf_token: str | None = Form(None),
-    user: User = Depends(authenticated_user),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     validate_csrf(request, csrf_token)
     password_error = None
     if new_password:
-        if not current_password or authenticate(db, user.username, current_password) is None:
+        if not current_password or not verify_password(current_password, user.password_hash):
             password_error = "当前密码不正确"
         elif new_password != confirm_password:
             password_error = "两次输入的新密码不一致"
@@ -404,6 +494,47 @@ def update_account(
         password_error=password_error,
         name_saved=bool(display_name.strip()),
     )
+
+
+@router.post("/switch-mode")
+def switch_mode(
+    request: Request,
+    mode: str = Form(...),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(authenticated_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    current_mode = "admin" if user.role == "admin" else "user"
+    if mode == current_mode:
+        return RedirectResponse(_login_redirect(user), status_code=303)
+    if mode == "user" and user.role == "admin":
+        target = ensure_user_mode_identity(db, user)
+    elif mode == "admin" and user.role == "user" and user.paired_user is not None:
+        target = user.paired_user
+        if target.role != "admin" or not target.is_active:
+            return HTMLResponse("管理员身份不可用", status_code=403)
+    else:
+        return HTMLResponse("无权切换到该身份", status_code=403)
+    if not target.is_active:
+        return HTMLResponse("目标身份已停用", status_code=403)
+    remember_me = bool(request.session.get("remember_me"))
+    request.session.clear()
+    request.session["user_id"] = target.id
+    request.session["user_created_at"] = target.created_at.isoformat()
+    request.session["login_mode"] = mode
+    request.session["remember_me"] = remember_me
+    db.add(
+        AuditLog(
+            actor_user_id=target.id,
+            action="switch_login_mode",
+            target_type="user",
+            target_id=str(target.id),
+            metadata_json={"from": current_mode, "to": mode},
+        )
+    )
+    db.commit()
+    return RedirectResponse(_login_redirect(target), status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -2537,9 +2668,14 @@ def demo_seed(
 # ---------------------------------------------------------------------------
 
 
+def _visible_accounts_query():
+    """Return real accounts, excluding private paired user identities."""
+    return select(User).where(or_(User.role == "admin", User.paired_user_id.is_(None)))
+
+
 @router.get("/admin", response_class=HTMLResponse)
 def admin_page(request: Request, user: User = Depends(admin_user), db: Session = Depends(get_db)):
-    users = list(db.scalars(select(User).order_by(User.created_at.desc())))
+    users = list(db.scalars(_visible_accounts_query().order_by(User.created_at.desc())))
     profiles = list(
         db.scalars(select(AIProviderProfile).order_by(AIProviderProfile.created_at.desc()))
     )
@@ -2569,7 +2705,7 @@ def _render_admin_users_page(
     db: Session,
     error: str | None,
 ):
-    users = list(db.scalars(select(User).order_by(User.created_at.desc())))
+    users = list(db.scalars(_visible_accounts_query().order_by(User.created_at.desc())))
     return _render(request, "admin_users.html", user=user, users=users, error=error)
 
 
@@ -3032,8 +3168,12 @@ def toggle_user_active(
     target = db.get(User, user_id)
     if target is None:
         return HTMLResponse("账号不存在", status_code=404)
+    if target.role == "user" and target.paired_user is not None:
+        return HTMLResponse("账号不存在", status_code=404)
     if target.id == user.id:
         return _render_admin_users_page(request, user, db, error="不能停用自己的账号")
     target.is_active = not target.is_active
+    if target.paired_user is not None:
+        target.paired_user.is_active = target.is_active
     db.commit()
     return RedirectResponse("/admin/users", status_code=303)
