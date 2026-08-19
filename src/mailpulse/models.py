@@ -319,6 +319,32 @@ class Report(Base):
     )
 
     task: Mapped[Task | None] = relationship()
+    action_states: Mapped[list[ReportActionState]] = relationship(
+        back_populates="report", cascade="all, delete-orphan"
+    )
+
+
+class ReportActionState(Base):
+    """Mutable completion state kept separate from immutable report content."""
+
+    __tablename__ = "report_action_states"
+    __table_args__ = (
+        UniqueConstraint("report_id", "action_index", name="uq_report_action_state_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    report_id: Mapped[int] = mapped_column(
+        ForeignKey("reports.id", ondelete="CASCADE"), index=True
+    )
+    action_index: Mapped[int] = mapped_column(Integer)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+    report: Mapped[Report] = relationship(back_populates="action_states")
 
 
 class Delivery(Base):

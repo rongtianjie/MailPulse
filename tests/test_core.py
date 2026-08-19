@@ -33,7 +33,7 @@ from mailpulse.attachments.converter import MarkItDownAttachmentConverter
 from mailpulse.auth import authenticate, create_user
 from mailpulse.config import Settings, get_settings
 from mailpulse.db import bootstrap_database, build_session_factory, init_database, reset_database
-from mailpulse.delivery import ReportDeliveryService
+from mailpulse.delivery import ReportDeliveryService, SMTPConfig, SMTPDeliveryProvider
 from mailpulse.demo import demo_messages, seed_demo
 from mailpulse.filtering import RuleEvaluator, RuleValidationError
 from mailpulse.mail.connectors import FakeMailConnector, IMAPConnector
@@ -50,17 +50,25 @@ from mailpulse.models import (
     MessageOccurrence,
     ModelBinding,
     Report,
+    ReportActionState,
     RuleSet,
     Task,
     TaskDeliveryTarget,
     User,
 )
 from mailpulse.report_service import ReportService
-from mailpulse.reports import render_summary_markdown
+from mailpulse.reports import (
+    build_report_title,
+    extract_filter_keywords,
+    render_markdown_html,
+    render_report_delivery_markdown,
+    render_summary_markdown,
+)
 from mailpulse.rules import RuleService
 from mailpulse.search import SearchService
 from mailpulse.security import decrypt_secret, encrypt_secret, verify_password
 from mailpulse.web.rate_limit import LoginRateLimiter
+from mailpulse.web.routes import _fmt_time, _timezone_suffix
 from mailpulse.worker import (
     _due_fire_time,
     _recover_stale_jobs,
@@ -801,6 +809,131 @@ def test_rendered_report_contains_source_locations():
     assert "邮件 1，附件 2，第 3 页，图片 1，摘录：截止日期" in rendered
 
 
+def test_report_title_uses_filter_window_and_positive_text_keywords():
+    class Rule:
+        def __init__(self, definition, enabled=True):
+            self.definition = definition
+            self.is_enabled = enabled
+
+    rules = [
+        Rule(
+            {
+                "kind": "group",
+                "operator": "and",
+                "children": [
+                    {
+                        "kind": "condition", "field": "subject",
+                        "operator": "contains", "value": "发布",
+                    },
+                    {
+                        "kind": "condition", "field": "body_text",
+                        "operator": "equals", "value": "客户反馈",
+                    },
+                    {
+                        "kind": "condition", "field": "sender",
+                        "operator": "not_contains", "value": "广告",
+                    },
+                    {
+                        "kind": "condition", "field": "subject",
+                        "operator": "regex", "value": "周报.*",
+                    },
+                    {
+                        "kind": "condition", "field": "attachment_size",
+                        "operator": "greater_than", "value": 10,
+                    },
+                ],
+            }
+        ),
+        Rule(
+            {"kind": "condition", "field": "subject", "operator": "contains", "value": "发布"}
+        ),
+        Rule(
+            {"kind": "condition", "field": "subject", "operator": "contains", "value": "停用词"},
+            enabled=False,
+        ),
+    ]
+    keywords = extract_filter_keywords(rules)
+    assert keywords == ["发布", "客户反馈"]
+    title = build_report_title(
+        datetime(2026, 8, 18, 1, tzinfo=UTC),
+        datetime(2026, 8, 19, 1, tzinfo=UTC),
+        "Asia/Shanghai",
+        keywords,
+    )
+    assert title == "邮件归纳｜08-18 09:00–08-19 09:00｜关键词：发布、客户反馈"
+    assert "MailPulse" not in title
+    assert "周报" not in title
+
+
+def test_report_time_format_and_timezone_suffix():
+    value = datetime(2026, 8, 18, 1, tzinfo=UTC)
+    assert _fmt_time(value, "Asia/Shanghai") == "2026-08-18 09:00"
+    assert _timezone_suffix("Asia/Shanghai") == ""
+    assert _fmt_time(value, "UTC") == "2026-08-18 01:00"
+    assert _timezone_suffix("UTC") == "（UTC）"
+
+
+def test_markdown_html_is_rendered_and_sanitized():
+    rendered = str(
+        render_markdown_html(
+            "# 标题\n\n**重点**\n\n- [ ] 跟进\n\n"
+            "[安全链接](https://example.com) [危险链接](javascript:alert(1))\n\n"
+            "<script>alert('xss')</script>"
+        )
+    )
+    assert "<h1>标题</h1>" in rendered
+    assert "<strong>重点</strong>" in rendered
+    assert 'type="checkbox"' in rendered
+    assert 'href="https://example.com"' in rendered
+    assert "javascript:" not in rendered
+    assert "<script" not in rendered
+
+
+def test_smtp_delivery_contains_plain_text_and_html_alternative():
+    messages = []
+
+    class RecordingConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def send_message(self, message):
+            messages.append(message)
+
+    provider = SMTPDeliveryProvider(
+        SMTPConfig("smtp.example.com", 465, "mailbox@example.com", "secret")
+    )
+    provider._connect = RecordingConnection
+    provider.send(
+        "mailbox@example.com",
+        "recipient@example.com",
+        "测试报告",
+        "# 标题\n\n**重点**\n\n<script>alert('xss')</script>",
+    )
+
+    message = messages[0]
+    assert message.get_content_type() == "multipart/alternative"
+    assert "# 标题" in message.get_body(preferencelist=("plain",)).get_content()
+    html = message.get_body(preferencelist=("html",)).get_content()
+    assert "<h1>标题</h1>" in html
+    assert "<strong>重点</strong>" in html
+    assert "<script>alert" not in html
+
+
+def test_report_delivery_markdown_overlays_only_action_section():
+    original = (
+        "# 报告\n\n摘要中的示例：\n- [ ] 不应变化\n\n"
+        "## 行动项\n- [ ] 第一项\n- [x] 第二项\n\n"
+        "## 风险\n- [ ] 风险中的示例也不应变化"
+    )
+    rendered = render_report_delivery_markdown(original, 2, {0})
+    assert "摘要中的示例：\n- [ ] 不应变化" in rendered
+    assert "## 行动项\n- [x] 第一项\n- [ ] 第二项" in rendered
+    assert "## 风险\n- [ ] 风险中的示例也不应变化" in rendered
+
+
 class RecordingProvider:
     def __init__(self, name: str, response: dict, error: Exception | None = None):
         self.name = name
@@ -1483,7 +1616,10 @@ def test_report_delivery_records_failure_and_retry(tmp_path):
             period_end=datetime.now(UTC),
             status="success",
             title="测试报告",
-            rendered_markdown="正文不应写入错误日志",
+            summary={"action_items": [{"action": "确认排期"}]},
+            rendered_markdown=(
+                "# 正文不应写入错误日志\n\n## 行动项\n- [ ] 确认排期\n\n## 风险\n- 无"
+            ),
         )
         db.add(report)
         db.flush()
@@ -1494,12 +1630,23 @@ def test_report_delivery_records_failure_and_retry(tmp_path):
         assert failed.status == "failed"
         assert failed.attempts == 1
         assert "smtp-secret" not in (failed.error_message or "")
+        db.add(
+            ReportActionState(
+                report_id=report.id,
+                action_index=0,
+                is_completed=True,
+                completed_at=datetime.now(UTC),
+            )
+        )
+        db.flush()
         provider = FakeDeliveryProvider()
         retried = ReportDeliveryService(db).retry_delivery(failed, report, mailbox, provider)
         db.commit()
         assert retried.status == "sent"
         assert retried.attempts == 2
         assert provider.calls[0][1] == "recipient@example.com"
+        assert "## 行动项\n- [x] 确认排期" in provider.calls[0][3]
+        assert "## 行动项\n- [ ] 确认排期" in report.rendered_markdown
     finally:
         db.close()
 
@@ -1616,12 +1763,17 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     assert user_client.post("/demo/seed", data={"csrf_token": token}).status_code == 200
     task_db = build_session_factory(settings)()
     try:
-        task_id = task_db.query(Task).filter(Task.user_id == user.id).one().id
+        task = task_db.query(Task).filter(Task.user_id == user.id).one()
+        task.timezone = "UTC"
+        task_db.commit()
+        task_id = task.id
         mailbox_id = task_db.query(Mailbox).filter(Mailbox.user_id == user.id).one().id
     finally:
         task_db.close()
     monkeypatch.setattr("mailpulse.web.routes.IMAPConnector.test_connection", lambda self: None)
     task_page = user_client.get(f"/tasks/{task_id}")
+    assert '<select name="timezone" required>' in task_page.text
+    assert '<option value="UTC" selected>' in task_page.text
     task_token = re.search(r'name="csrf_token" value="([^"]+)"', task_page.text).group(1)
     tested = user_client.post(
         f"/tasks/{task_id}/mailbox/test", data={"csrf_token": task_token}
@@ -1670,8 +1822,14 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
                 period_end=period_end or datetime.now(UTC),
                 status="success",
                 title="演示报告",
-                summary={"message_count": 2},
-                rendered_markdown="演示报告正文",
+                summary={
+                    "message_count": 2,
+                    "action_items": [{"action": "确认发布排期"}],
+                },
+                rendered_markdown=(
+                    "# 演示报告正文\n\n**重点内容**\n\n"
+                    "## 行动项\n- [ ] 确认发布排期"
+                ),
                 model_trace={"used_vision": False},
             )
             self.session.add(report)
@@ -1709,7 +1867,31 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
     assert "演示报告" in reports_page_text
     report_detail_page = user_client.get(f"/reports/{report_id}")
     assert report_detail_page.status_code == 200
+    assert "<h1>演示报告正文</h1>" in report_detail_page.text
+    assert "<strong>重点内容</strong>" in report_detail_page.text
+    assert "data-report-actions" in report_detail_page.text
+    assert "（UTC）" in report_detail_page.text
     assert '"used_vision": false' in report_detail_page.text
+    report_token = re.search(
+        r'data-csrf-token="([^"]+)"', report_detail_page.text
+    ).group(1)
+    action_response = user_client.post(
+        f"/reports/{report_id}/actions/0",
+        data={"completed": "true", "csrf_token": report_token},
+    )
+    assert action_response.status_code == 200
+    assert action_response.json() == {"action_index": 0, "completed": True}
+    action_db = build_session_factory(settings)()
+    try:
+        action_state = action_db.query(ReportActionState).one()
+        assert action_state.report_id == report_id
+        assert action_state.action_index == 0
+        assert action_state.is_completed is True
+        assert action_state.completed_at is not None
+    finally:
+        action_db.close()
+    refreshed_report = user_client.get(f"/reports/{report_id}")
+    assert "data-completed-actions='[0]'" in refreshed_report.text
 
     # 创建定时任务：计划字段组合成 cron
     tasks_page = user_client.get("/tasks/new")
@@ -1757,6 +1939,15 @@ def test_web_login_csrf_and_demo_report(tmp_path, monkeypatch):
         },
     )
     assert other_client.get(f"/reports/{report_id}").status_code == 404
+    other_dashboard = other_client.get("/")
+    other_csrf = re.search(r'name="csrf_token" value="([^"]+)"', other_dashboard.text).group(1)
+    assert (
+        other_client.post(
+            f"/reports/{report_id}/actions/0",
+            data={"completed": "false", "csrf_token": other_csrf},
+        ).status_code
+        == 404
+    )
     assert other_client.get("/admin").status_code == 403
 
 
@@ -3063,6 +3254,9 @@ def test_report_scope_filters_before_limit_and_uses_occurrence_time(tmp_path):
         assert report.summary["matched_message_count"] == 1
         assert report.summary["message_count"] == 1
         assert report.summary["truncated"] is False
+        assert report.summary["filter_keywords"] == ["命中"]
+        assert report.title == "邮件归纳｜08-18 08:59–08-18 10:01｜关键词：命中"
+        assert report.rendered_markdown.startswith(f"# {report.title}\n")
         assert "命中旧邮件" in report.rendered_markdown or report.summary["message_count"] == 1
     finally:
         db.close()

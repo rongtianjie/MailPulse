@@ -55,9 +55,10 @@
   {% if reports %}
   <div class="list">
     {% for report in reports %}
+    {% set report_tz = report.task.timezone if report.task else default_timezone %}
     <a class="list-item" href="/reports/{{ report.id }}">
-      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
-      <span class="muted">{{ report.created_at | fmt_time }}</span>
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ report.status }}</span><small>{{ report.period_start | fmt_time(report_tz) }} 至 {{ report.period_end | fmt_time(report_tz) }}{{ report_tz | timezone_suffix }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
+      <span class="muted">{{ report.created_at | fmt_time(report_tz) }}</span>
     </a>
     {% endfor %}
   </div>

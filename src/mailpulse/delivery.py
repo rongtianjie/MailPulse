@@ -7,11 +7,13 @@ from email.message import EmailMessage
 from email.utils import getaddresses
 from typing import Protocol
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .errors import error_message
-from .models import AuditLog, Delivery, Mailbox, Report, utc_now
+from .models import AuditLog, Delivery, Mailbox, Report, ReportActionState, utc_now
+from .reports import render_markdown_email_html, render_report_delivery_markdown
 from .security import decrypt_secret
 
 
@@ -56,6 +58,7 @@ class SMTPDeliveryProvider:
         message["To"] = recipient
         message["Subject"] = _safe_subject(subject)
         message.set_content(body)
+        message.add_alternative(render_markdown_email_html(body), subtype="html")
         with self._connect() as client:
             client.send_message(message)
 
@@ -149,11 +152,26 @@ class ReportDeliveryService:
                         use_tls=mailbox.smtp_tls,
                     )
                 )
+            action_items = report.summary.get("action_items", [])
+            action_count = len(action_items) if isinstance(action_items, list) else 0
+            completed_action_indices = set(
+                self.session.scalars(
+                    select(ReportActionState.action_index).where(
+                        ReportActionState.report_id == report.id,
+                        ReportActionState.is_completed.is_(True),
+                    )
+                )
+            )
+            delivery_markdown = render_report_delivery_markdown(
+                report.rendered_markdown,
+                action_count,
+                completed_action_indices,
+            )
             provider.send(
                 mailbox.email_address,
                 delivery.destination,
                 report.title,
-                report.rendered_markdown,
+                delivery_markdown,
             )
         except Exception as exc:
             delivery.status = "failed"

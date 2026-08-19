@@ -454,9 +454,72 @@ function setupScheduleForm(form) {
   sync();
 }
 
+function setupReportActions(report) {
+  const endpoint = report.dataset.actionEndpoint;
+  const csrfToken = report.dataset.csrfToken;
+  const status = report.parentElement.querySelector("[data-report-action-status]");
+  if (!endpoint || !csrfToken) return;
+  let completedActions = [];
+  try {
+    completedActions = JSON.parse(report.dataset.completedActions || "[]");
+  } catch {
+    completedActions = [];
+  }
+  const completed = new Set(completedActions.map(Number));
+  const actionHeading = [...report.querySelectorAll("h2")].find(
+    (heading) => heading.textContent.trim() === "行动项",
+  );
+  let actionList = actionHeading?.nextElementSibling;
+  while (actionList && !["UL", "OL", "H2"].includes(actionList.tagName)) {
+    actionList = actionList.nextElementSibling;
+  }
+  if (!actionList || !["UL", "OL"].includes(actionList.tagName)) return;
+
+  const checkboxes = actionList.querySelectorAll(".task-list-item input[type='checkbox']");
+  checkboxes.forEach((checkbox, actionIndex) => {
+    const item = checkbox.closest(".task-list-item");
+    checkbox.disabled = false;
+    checkbox.checked = completed.has(actionIndex);
+    item?.classList.toggle("action-completed", checkbox.checked);
+    checkbox.addEventListener("change", async () => {
+      const desired = checkbox.checked;
+      checkbox.disabled = true;
+      item?.classList.add("action-saving");
+      if (status) {
+        status.textContent = "正在保存行动项状态…";
+        status.classList.remove("error");
+      }
+      try {
+        const body = new URLSearchParams({
+          completed: String(desired),
+          csrf_token: csrfToken,
+        });
+        const response = await fetch(`${endpoint}/${actionIndex}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body,
+        });
+        if (!response.ok) throw new Error("save failed");
+        item?.classList.toggle("action-completed", desired);
+        if (status) status.textContent = "行动项状态已保存。";
+      } catch {
+        checkbox.checked = !desired;
+        if (status) {
+          status.textContent = "行动项状态保存失败，请重试。";
+          status.classList.add("error");
+        }
+      } finally {
+        checkbox.disabled = false;
+        item?.classList.remove("action-saving");
+      }
+    });
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("[data-wizard]").forEach(setupWizard);
   document.querySelectorAll("[data-rule-editor]").forEach(setupRuleEditor);
   document.querySelectorAll("[data-run-monitor]").forEach(setupRunMonitor);
   document.querySelectorAll("[data-schedule-form]").forEach(setupScheduleForm);
+  document.querySelectorAll("[data-report-actions]").forEach(setupReportActions);
 });

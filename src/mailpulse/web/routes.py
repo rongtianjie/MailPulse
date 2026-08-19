@@ -31,11 +31,14 @@ from ..models import (
     Mailbox,
     ModelBinding,
     Report,
+    ReportActionState,
     RuleSet,
     Task,
     TaskDeliveryTarget,
     User,
+    utc_now,
 )
+from ..reports import render_markdown_html
 from ..rules import MATCH_ALL, RuleService
 from ..search import SearchService
 from ..security import decrypt_secret, encrypt_secret, verify_password
@@ -54,6 +57,17 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent.parent / "templa
 router = APIRouter()
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
+TIMEZONE_CHOICES = (
+    ("Asia/Shanghai", "中国标准时间（Asia/Shanghai）"),
+    ("Asia/Hong_Kong", "香港时间（Asia/Hong_Kong）"),
+    ("Asia/Singapore", "新加坡时间（Asia/Singapore）"),
+    ("Asia/Tokyo", "日本时间（Asia/Tokyo）"),
+    ("UTC", "协调世界时（UTC）"),
+    ("Europe/London", "伦敦时间（Europe/London）"),
+    ("America/New_York", "纽约时间（America/New_York）"),
+    ("America/Los_Angeles", "洛杉矶时间（America/Los_Angeles）"),
+    ("Australia/Sydney", "悉尼时间（Australia/Sydney）"),
+)
 MESSAGES_PAGE_SIZE = 50
 REMEMBER_PASSWORD_COOKIE = "mailpulse_remember_credentials"
 TASK_RUN_STAGES = {"sync", "attachments", "summarize", "delivery", "complete"}
@@ -111,10 +125,21 @@ def _fmt_time(value, tz: str = DEFAULT_TIMEZONE) -> str:
 
 
 templates.env.filters["fmt_time"] = _fmt_time
+templates.env.filters["render_markdown"] = render_markdown_html
+
+
+def _timezone_suffix(timezone: str | None) -> str:
+    if not timezone or timezone == DEFAULT_TIMEZONE:
+        return ""
+    return f"（{timezone}）"
+
+
+templates.env.filters["timezone_suffix"] = _timezone_suffix
 
 
 def _render(request: Request, template: str, **context):
     context.setdefault("csrf_token", get_csrf_token(request))
+    context.setdefault("default_timezone", DEFAULT_TIMEZONE)
     return templates.TemplateResponse(request=request, name=template, context=context)
 
 
@@ -1009,6 +1034,7 @@ def _render_task_page(
         tested=tested,
         tested_smtp=tested_smtp,
         sync_failed=sync_failed,
+        timezone_choices=TIMEZONE_CHOICES,
     )
 
 
@@ -1085,6 +1111,7 @@ def _render_task_new_page(
         rules_form=rules_form,
         targets_form=targets_form,
         mailboxes=mailboxes,
+        timezone_choices=TIMEZONE_CHOICES,
         active_step=active_step,
         rule_fields=RULE_FORM_FIELDS,
         rule_operators=RULE_FORM_OPERATORS,
@@ -2573,6 +2600,14 @@ def report_detail(
     )
     task = db.get(Task, report.task_id) if report.task_id else None
     targets = [item for item in task.delivery_targets if item.is_enabled] if task else []
+    completed_action_indices = list(
+        db.scalars(
+            select(ReportActionState.action_index).where(
+                ReportActionState.report_id == report.id,
+                ReportActionState.is_completed.is_(True),
+            )
+        )
+    )
     return _render(
         request,
         "report_detail.html",
@@ -2581,8 +2616,50 @@ def report_detail(
         task=task,
         deliveries=deliveries,
         delivery_targets=targets,
+        completed_action_indices=completed_action_indices,
         error=request.query_params.get("delivery_error"),
     )
+
+
+@router.post("/reports/{report_id}/actions/{action_index}")
+def update_report_action_state(
+    request: Request,
+    report_id: int,
+    action_index: int,
+    completed: bool = Form(...),
+    csrf_token: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    validate_csrf(request, csrf_token)
+    report = db.scalar(select(Report).where(Report.id == report_id, Report.user_id == user.id))
+    if report is None:
+        return JSONResponse({"detail": "报告不存在"}, status_code=404)
+    action_items = report.summary.get("action_items", [])
+    if not isinstance(action_items, list) or action_index < 0 or action_index >= len(action_items):
+        return JSONResponse({"detail": "行动项不存在"}, status_code=404)
+    state = db.scalar(
+        select(ReportActionState).where(
+            ReportActionState.report_id == report.id,
+            ReportActionState.action_index == action_index,
+        )
+    )
+    if state is None:
+        state = ReportActionState(report_id=report.id, action_index=action_index)
+        db.add(state)
+    state.is_completed = completed
+    state.completed_at = utc_now() if completed else None
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            action="report_action_update",
+            target_type="report",
+            target_id=str(report.id),
+            metadata_json={"action_index": action_index, "completed": completed},
+        )
+    )
+    db.commit()
+    return JSONResponse({"action_index": action_index, "completed": completed})
 
 
 @router.post("/reports/{report_id}/send")

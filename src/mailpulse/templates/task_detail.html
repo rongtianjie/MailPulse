@@ -46,7 +46,10 @@
       <option value="mon,wed,fri" {% if form.weekdays == 'mon,wed,fri' %}selected{% endif %}>周一、三、五</option>
     </select></label>
     <label data-schedule-field="custom">自定义 cron<input name="custom_cron" value="{{ form.custom_cron }}" placeholder="分 时 日 月 星期，例如 0 9 * * 1-5"></label>
-    <label>时区<input name="timezone" value="{{ form.timezone }}" required></label>
+    <label>时区<select name="timezone" required>
+      {% if form.timezone not in timezone_choices|map(attribute=0)|list %}<option value="{{ form.timezone }}" selected>{{ form.timezone }}（已有配置）</option>{% endif %}
+      {% for value, label in timezone_choices %}<option value="{{ value }}" {% if form.timezone == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select></label>
     <label>回看时间（小时）<input type="number" name="lookback_hours" min="1" max="744" value="{{ form.lookback_hours }}" required></label>
     <label class="check"><input type="checkbox" name="is_enabled" {% if form.is_enabled %}checked{% endif %}> 启用该任务</label>
     <div class="form-actions"><button class="primary" type="submit" data-processing-label="保存中…">保存基本信息</button></div>
@@ -244,9 +247,10 @@
   {% if reports %}
   <div class="list">
     {% for report in reports %}
+    {% set report_tz = task.timezone %}
     <a class="list-item" href="/reports/{{ report.id }}">
-      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ {'success': '成功', 'failed': '失败', 'pending': '等待中'}.get(report.status, report.status) }}</span><small>{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
-      <span class="muted">{{ report.created_at | fmt_time }}</span>
+      <div><strong>{{ report.title }}</strong><span class="tag {{ report.status }}">{{ {'success': '成功', 'failed': '失败', 'pending': '等待中'}.get(report.status, report.status) }}</span><small>{{ report.period_start | fmt_time(report_tz) }} 至 {{ report.period_end | fmt_time(report_tz) }}{{ report_tz | timezone_suffix }}{% if report.summary.get('message_count') %} · {{ report.summary.message_count }} 封邮件{% endif %}</small></div>
+      <span class="muted">{{ report.created_at | fmt_time(report_tz) }}</span>
     </a>
     {% endfor %}
   </div>

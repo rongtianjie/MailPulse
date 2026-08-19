@@ -26,7 +26,7 @@ from .models import (
     Task,
     User,
 )
-from .reports import render_summary_markdown
+from .reports import build_report_title, extract_filter_keywords, render_summary_markdown
 from .rules import RuleService
 
 
@@ -151,7 +151,7 @@ class ReportService:
             },
         )
         end = period_end
-        start = min(
+        matched_start = min(
             (
                 message_times.get(message.id) or message.received_at
                 for message in messages
@@ -159,6 +159,7 @@ class ReportService:
             ),
             default=period_start or end - timedelta(days=1),
         )
+        start = period_start or matched_start
         conversion_status = [
             f"附件 {attachment_id}: {result.status}"
             + (f"（{'；'.join(result.warnings)}）" if result.warnings else "")
@@ -173,7 +174,12 @@ class ReportService:
         summary_payload["matched_message_count"] = total_matches
         summary_payload["message_limit"] = self.settings.max_messages_per_report
         summary_payload["truncated"] = total_matches > len(messages)
-        rendered_markdown = render_summary_markdown(summary, start, end)
+        keywords = extract_filter_keywords(rule_sets)
+        summary_payload["filter_keywords"] = keywords
+        summary_payload["filter_period_start"] = start.isoformat()
+        summary_payload["filter_period_end"] = end.isoformat()
+        report_title = build_report_title(start, end, task.timezone, keywords)
+        rendered_markdown = render_summary_markdown(summary, start, end, title=report_title)
         if trace.get("vision_error"):
             summary_payload["vision_degraded"] = True
             rendered_markdown += (
@@ -193,7 +199,7 @@ class ReportService:
             period_start=start,
             period_end=end,
             status="success",
-            title="邮件归纳报告",
+            title=report_title,
             summary=summary_payload,
             rendered_markdown=rendered_markdown,
             model_trace=trace,

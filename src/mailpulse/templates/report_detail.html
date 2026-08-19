@@ -2,12 +2,20 @@
 {% block title %}{{ report.title }} - MailPulse{% endblock %}
 {% block content %}
 <div class="page-heading">
-  <div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start | fmt_time }} 至 {{ report.period_end | fmt_time }}{% if report.summary.get('message_count') %} · 纳入 {{ report.summary.message_count }} 封邮件{% endif %}{% if report.summary.get('truncated') %} · 命中 {{ report.summary.matched_message_count }} 封，已按上限截断{% endif %}{% if task %} · <a href="/tasks/{{ task.id }}">任务：{{ task.name }}</a>{% endif %}</p></div>
+  {% set report_tz = task.timezone if task else default_timezone %}
+  <div><p class="eyebrow">报告详情</p><h1>{{ report.title }}</h1><p class="muted">{{ report.period_start | fmt_time(report_tz) }} 至 {{ report.period_end | fmt_time(report_tz) }}{{ report_tz | timezone_suffix }}{% if report.summary.get('message_count') %} · 纳入 {{ report.summary.message_count }} 封邮件{% endif %}{% if report.summary.get('truncated') %} · 命中 {{ report.summary.matched_message_count }} 封，已按上限截断{% endif %}{% if task %} · <a href="/tasks/{{ task.id }}">任务：{{ task.name }}</a>{% endif %}</p></div>
   <span class="tag {{ report.status }}">{{ {'success': '成功', 'failed': '失败', 'pending': '等待中'}.get(report.status, report.status) }}</span>
 </div>
 <section class="card report-card">
   {% if report.summary.get('vision_degraded') %}<div class="notice">视觉副模型处理失败，本报告未使用或未验证图片视觉证据；主模型已继续生成结果。</div>{% endif %}
-  <pre class="report-content">{{ report.rendered_markdown }}</pre>
+  <article
+    class="report-content"
+    data-report-actions
+    data-action-endpoint="/reports/{{ report.id }}/actions"
+    data-completed-actions='{{ completed_action_indices | tojson }}'
+    data-csrf-token="{{ csrf_token }}"
+  >{{ report.rendered_markdown | render_markdown }}</article>
+  <p class="report-action-status muted" data-report-action-status aria-live="polite"></p>
 </section>
 <section class="card">
   <div class="section-heading"><h2>邮件投递</h2></div>
