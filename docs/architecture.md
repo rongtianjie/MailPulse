@@ -41,19 +41,25 @@ Worker ────────┘
 
 模型调用使用独立的 system prompt 与 user 数据消息。邮件正文、附件 Markdown、OCR 文本和视觉证据均按不可信数据处理，不能改变系统规则。结构化输出优先使用 JSON Schema，服务不支持时回退到 JSON object，并对不可解析输出进行一次 JSON 修复请求。
 
+最终报告保留两层表示：`reports.summary` 保存经过 Pydantic 校验的结构化 JSON，`reports.rendered_markdown` 保存由服务端确定性生成的 Markdown。报告标题包含筛选时间窗口和从启用规则正向文本条件中提取的有限关键词；时间窗口按任务 IANA 时区格式化。网页和邮件共用 Markdown 渲染逻辑，渲染后的 HTML 再通过标签、属性和 URL 协议白名单清洗，模型输出或邮件内容不能直接注入可信 HTML。
+
+行动项的完成状态不写回 `rendered_markdown`。`ReportActionState` 按报告 ID 和行动项序号保存可变状态，并通过唯一约束避免重复记录。报告正文因而保持生成时的不可变快照；发送或重试邮件时，投递服务读取最新行动项状态，只在本次邮件 Markdown 快照中覆盖复选框状态。
+
 ## 4. 权限与数据范围
 
 应用使用本地账号和 Session 认证。账号以用户名（`users.username`，全局唯一、大小写不敏感）作为登录标识，账号不绑定邮箱。收件邮箱（IMAP 账户）与报告投递邮箱分离：任务通过 `mailboxes` 关联收件邮箱，报告投递目标由 `task_delivery_targets` 表按任务配置（网页查看渠道始终开启，SMTP 渠道支持每个任务配置多个收件人，未来可扩展更多投递方式）。管理员和普通用户使用不同的网页布局与路由组：
 
 - 登录入口：`/login`；普通用户注册：`/register`；健康检查：`/healthz`。
 - 管理员路由：`/admin`、`/admin/users`、`/admin/models`、`/admin/jobs`、`/admin/account/password`。
-- 普通用户路由：`/`、`/tasks`（含 `/tasks/new` 与 `/tasks/{id}` 详情）、`/messages`、`/reports` 和 `/account`；任务运行、邮件状态、报告投递和模型连接测试均由对应资源路由处理。
+- 普通用户路由：`/`、`/tasks`（含 `/tasks/new` 与 `/tasks/{id}` 详情）、`/messages`、`/reports` 和 `/account`；任务运行、邮件状态、行动项状态、报告投递和模型连接测试均由对应资源路由处理。
 
 未登录或 Session 中的账号无效时，受保护页面返回 `303` 并跳转到 `/login`。登录后，管理员进入 `/admin`，普通用户进入 `/`；使用默认管理员首次登录时先进入账号密码设置页，该步骤可以跳过。
 
 Session 使用签名 Cookie。未勾选“记住登录状态”时，Cookie 为浏览器会话级别；勾选后按 `MAILPULSE_REMEMBER_ME_DAYS` 设置有效期，默认 30 天。该选项不保存密码。
 
 权限检查位于服务端依赖层。需要读取用户数据的查询必须附带当前账号范围，不能依赖模板或前端导航隐藏。
+
+行动项更新接口先校验 Session、CSRF token、报告所有权和行动项序号，再写入状态及审计日志。SMTP 邮件采用 `multipart/alternative`：纯文本部分保留 Markdown，HTML 部分使用同一安全渲染结果；不支持 HTML 的客户端仍可读取纯文本报告。
 
 ## 5. 运行模型
 
